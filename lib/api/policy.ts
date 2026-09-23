@@ -24,6 +24,10 @@
  *  - **A missing configured secret refuses everything.** An unset CRON_SECRET must
  *    not mean "no auth required" — that turns a deploy mistake into an open
  *    endpoint.
+ *  - **Admin authentication is separated from user sessions.** Admin routes
+ *    require explicit admin credentials (via `requiresAdmin` flag) and are
+ *    distinct from user wallet authentication. This preserves funded-state safety
+ *    and clear operational boundaries.
  */
 
 import { apiError, type ApiErrorCode, type ApiErrorResult } from "./errors";
@@ -35,6 +39,7 @@ export const ACCESS_TIERS = [
   "registered_agent",
   "api_key_agent",
   "internal_worker",
+  "admin",
 ] as const;
 export type AccessTier = (typeof ACCESS_TIERS)[number];
 
@@ -50,6 +55,8 @@ export interface TierPolicy {
   requiresSignature: boolean;
   /** The shared worker secret must match. */
   requiresWorkerSecret: boolean;
+  /** Admin credentials must be present and valid. */
+  requiresAdmin: boolean;
   /** Rate-limit dimensions that apply. */
   limitDimensions: LimitRule["dimension"][];
 }
@@ -60,6 +67,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: false,
     requiresSignature: false,
     requiresWorkerSecret: false,
+    requiresAdmin: false,
     // IP and route only: an anonymous caller has no wallet to bucket by.
     limitDimensions: ["ip", "route"],
   },
@@ -68,6 +76,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: true,
     requiresSignature: false,
     requiresWorkerSecret: false,
+    requiresAdmin: false,
     limitDimensions: ["ip", "wallet", "route"],
   },
   registered_agent: {
@@ -75,6 +84,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: true,
     requiresSignature: true,
     requiresWorkerSecret: false,
+    requiresAdmin: false,
     limitDimensions: ["agent", "route"],
   },
   /**
@@ -92,6 +102,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: false,
     requiresSignature: false,
     requiresWorkerSecret: false,
+    requiresAdmin: false,
     limitDimensions: ["agent", "ip", "route"],
   },
   internal_worker: {
@@ -99,9 +110,27 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: false,
     requiresSignature: false,
     requiresWorkerSecret: true,
+    requiresAdmin: false,
     // Route only: a worker's own bursts are a scheduling problem, not abuse, and
     // bucketing by IP would rate-limit an entire serverless region together.
     limitDimensions: ["route"],
+  },
+  /**
+   * Admin tier for operational actions.
+   *
+   * Separated from user sessions to preserve funded-state safety. Admin actions
+   * require explicit admin credentials and are subject to strict rate limiting
+   * and audit trails. This tier does not rely on user wallet authentication.
+   */
+  admin: {
+    tier: "admin",
+    requiresWallet: false,
+    requiresSignature: false,
+    requiresWorkerSecret: false,
+    requiresAdmin: true,
+    // Strict rate limiting: admin actions are high-impact and should be limited
+    // by IP and route to prevent abuse, even from internal sources.
+    limitDimensions: ["ip", "route"],
   },
 };
 
@@ -119,6 +148,10 @@ export interface RequestContext {
   /** True when this call moves money or changes authority. */
   mutatesValue?: boolean;
   idempotencyKey?: string;
+  /** Admin credentials presented by the caller. */
+  presentedAdminCreds?: string;
+  /** Admin credentials the server expects. Undefined means none is configured. */
+  expectedAdminCreds?: string;
 }
 
 export interface AuthorizeResult {
@@ -165,6 +198,17 @@ export function authorizeRequest(
     const presented = ctx.presentedSecret?.trim() ?? "";
     if (!presented || !secretsMatch(presented, expected)) {
       return refuse("unauthenticated", "invalid worker credentials");
+    }
+  }
+
+  if (policy.requiresAdmin) {
+    const expected = ctx.expectedAdminCreds?.trim();
+    // An unset admin secret refuses rather than waves everyone through: a deploy that
+    // forgets it must fail closed, not open.
+    if (!expected) return refuse("forbidden", "admin credentials are not configured");
+    const presented = ctx.presentedAdminCreds?.trim() ?? "";
+    if (!presented || !secretsMatch(presented, expected)) {
+      return refuse("unauthenticated", "invalid admin credentials");
     }
   }
 
