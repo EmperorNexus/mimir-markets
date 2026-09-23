@@ -1,29 +1,29 @@
 /**
- * Analytics event contract — the shared envelope and the funnel event names.
+ * Analytics event contract - the shared envelope and the funnel event names.
  *
  * Two rules this module exists to enforce:
  *
  *  1. Every event carries the same envelope, so a funnel can be built without
- *     per-event special cases. `event_version` is stamped on all of them; a
- *     breaking payload change bumps it rather than silently reinterpreting old
- *     rows.
- *  2. Nothing user-secret is ever a property. Private keys, signatures, invite
- *     keys, raw prompts and per-user evidence are stripped at the capture
- *     boundary in ./redact.ts — this is analytics, not a ledger.
+*    per-event special cases. `event_version` is stamped on all of them; a
+*    breaking payload change bumps it rather than silently reinterpreting old
+*    rows.
+ * 2. Nothing user-secret is ever a property. Private keys, signatures, invite
+*    keys, raw prompts and per-user evidence are stripped at the capture
+    boundary in ./redact.ts - this is analytics, not a ledger.
  *
  * Financial truth lives in the contract and payments_v2. PostHog is never a
- * source for money numbers.
+* source for money numbers.
  */
 
 import { STELLAR_NETWORK, getMarketContractId } from "../stellar";
-import type { ProductModifier, SettlementMode, SubjectType } from "../market-modes";
+type { ProductModifier, SettlementMode, SubjectType } from "../market-modes";
 
 /**
  * Bumped on any breaking change to the envelope or a payload's meaning.
  *
- * **v2** replaced the numeric `chain_id` with a string `network` — see
+ * **v2** replaced the numeric `chain_id` with a string `network` - see
  * {@link EventEnvelope}. Rows from v1 carry the old field and cannot be filtered
- * by `network`, which is exactly why the version is stamped on every event.
+ * by`network`, which is exactly why the version is stamped on every event.
  */
 export const EVENT_VERSION = 2;
 
@@ -54,12 +54,12 @@ export type TxStatus = "none" | "submitted" | "confirmed" | "reverted" | "reject
 export interface EventEnvelope {
   event_version: number;
   /**
-   * Stellar network name — `"testnet"` today, `"public"` if this ever ships to
+   * Stellar network name - `testnet` today, `public` if this ever ships to
    * Pubnet. Replaces the EVM `chain_id: number`.
    *
    * A STRING and the short name, not the network passphrase, on purpose. Nothing
-   * downstream ever joined on `chain_id`: the only two consumers are
-   * {@link hasRequiredEnvelope} and `lib/analytics/quality.ts`, which both merely
+   * downstream ever joined on `chain_id: {only two consumers are
+   * {@link hasRequiredEnvelope} and `lib/analytics/quality.t`, which both merely
    * assert the field is present and well-typed. What the field is actually FOR is
    * a dashboard filter, and `network = "testnet"` reads in a PostHog breakdown
    * where a 34-character passphrase repeated on every event does not. The
@@ -68,7 +68,7 @@ export interface EventEnvelope {
    * costs nothing.
    */
   network: string;
-  /** Market contract id (`C…`). Case-sensitive base32 — never lowercased. */
+  /** Market contract id (cC..). Case-sensitive base32 - never lowercased. */
   contract?: string;
   claim_id?: number;
   category?: string;
@@ -82,7 +82,7 @@ export interface EventEnvelope {
   tx_status?: TxStatus;
 }
 
-/** Every funnel event Mimir emits. Adding one here is the only way to emit it. */
+/* Every funnel event Mimir emits. Adding one here is the only way to emit it. */
 export const ANALYTICS_EVENTS = [
   "market_viewed",
 
@@ -126,18 +126,18 @@ export function isAnalyticsEvent(name: string): name is AnalyticsEvent {
   return (ANALYTICS_EVENTS as readonly string[]).includes(name);
 }
 
-/** Per-event properties, on top of the envelope. */
+/* Per-event properties, on top of the envelope. */
 export type EventProperties = Record<string, string | number | boolean | string[] | undefined>;
 
 export interface EventInput {
   event: AnalyticsEvent;
-  envelope: Partial<EventEnvelope> & Pick<EventEnvelope, "actor_type" | "source_surface">;
+  envelope: Partial<EventEnvelope> & PickEventEnvelope, "actor_type" | "source_surface">;
   properties?: EventProperties;
 }
 
 /** Fill in the parts of the envelope that are the same for every event. */
 export function buildEnvelope(
-  partial: Partial<EventEnvelope> & Pick<EventEnvelope, "actor_type" | "source_surface">,
+  partial: Partial<EventEnvelope> & PickEventEnvelope, "actor_type" | "source_surface">,
 ): EventEnvelope {
   const contract = partial.contract ?? getMarketContractId();
   const envelope: EventEnvelope = {
@@ -146,8 +146,8 @@ export function buildEnvelope(
     actor_type: partial.actor_type,
     source_surface: partial.source_surface,
   };
-  // Passed through verbatim. The EVM version lowercased it to normalise hex
-  // casing; a `C…` strkey is case-sensitive base32 and lowercasing it produces a
+  // Passed through verbatim. The EVM version lowercased it to normalize hex
+  // casing; a `C..` strkey is case-sensitive base32 and lowercasing it produces a
   // contract id that matches nothing.
   if (contract) envelope.contract = contract;
   if (partial.claim_id !== undefined) envelope.claim_id = partial.claim_id;
@@ -162,7 +162,7 @@ export function buildEnvelope(
 }
 
 /**
- * True when this event has the fields the roadmap's KPI requires — used by the
+ * True when this event has the fields the roadmap's KPI requires - used by the
  * completeness test rather than by a dashboard filter after the fact.
  */
 export function hasRequiredEnvelope(properties: Record<string, unknown>): boolean {
@@ -175,7 +175,7 @@ export function hasRequiredEnvelope(properties: Record<string, unknown>): boolea
 }
 
 /**
- * Build a deterministic idempotency key. Same inputs → same key, so a retried
+ * Build a deterministic idempotency key. Same inputs “ same key, so a retried
  * worker or a double-submitted form is deduplicated by PostHog's $insert_id
  * instead of double-counting a funnel step.
  *

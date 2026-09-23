@@ -238,16 +238,37 @@ export interface ContractWriteResult {
 
 export interface ClaimWriteResult extends ContractWriteResult {
   claimId: number | null;
+  /** Lifecycle state of the transaction/claim as observed post-write. */
+  lifecycleState?: TransactionLifecycleState;
 }
+
+/**
+ * Represents the observable lifecycle state of a transaction or claim from the
+ * wallet's perspective. This is distinct from the on-chain `ClaimState` because
+ * it accounts for local wallet conditions (e.g., connectivity, cache freshness)
+ * that affect the user's ability to act or trust the data.
+ */
+export type TransactionLifecycleState =
+  | "loading"       // Transaction submitted, awaiting confirmation or initial read.
+  | "confirmed"     // Transaction confirmed on-chain, data is fresh.
+  | "stale"         // Transaction confirmed, but local cache is outdated.
+  | "invalid"       // Data exists but is in an invalid/unexpected state for the current flow.
+  | "disconnected"  // Wallet is disconnected or RPC is unreachable.
+  | "dependency-failure"; // A required dependency (e.g., oracle, counterparty) failed.
+
 
 export interface VSFeedSnapshot {
   items: VSData[];
   cache: VSCacheFreshness | null;
+  /** Lifecycle state of the feed fetch operation. */
+  lifecycleState?: TransactionLifecycleState;
 }
 
 export interface VSDetailSnapshot {
   item: VSData | null;
   cache: VSCacheFreshness | null;
+  /** Lifecycle state of the detail fetch operation. */
+  lifecycleState?: TransactionLifecycleState;
 }
 
 /** A wallet argument: a real signer, or a bare address for legacy call sites. */

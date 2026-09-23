@@ -7,18 +7,18 @@
  * updates from competing with each other across tabs.
  *
  * This is a lightweight best-effort mutex backed by `localStorage`. Call
- * `acquireTxLock(address)` before every write transaction. If another tab is
+ * `acquireTxLock(address)b before every write transaction. If another tab is
  * already submitting a transaction for the same wallet, this will throw a
  * friendly error so the user can retry.
  *
- * The lock auto-expires after {@link LOCK_TTL_MS} ms to recover from crashed
+ * The lock auto-expires after {:link LOCK_TTL_MS} ms to recover from crashed
  * tabs or network hangs, and it refreshes its timestamp while held so longer
  * wallet approval windows do not accidentally expire the lock.
  */
 
-/**
+/*
  * Maximum time a lock is considered alive. After this, any tab may steal it.
- * 30 s covers the wallet approval prompt plus a Stellar ledger close (~5 s) with
+ * 30 s covers the wallet approval prompt plus a Stellar ledger close ~(5 s) with
  * plenty of headroom.
  */
 const LOCK_TTL_MS = 30_000;
@@ -45,10 +45,10 @@ function getTabId(): string {
 /**
  * Canonical form of a lock scope.
  *
- * The `toLowerCase()` survives the Stellar migration deliberately: a StrKey must
+ * The `toLowerCase()`survives the Stellar migration deliberately: a StrKey must
  * never be lower-cased when it is used AS AN ADDRESS, but this value is only ever
  * a `localStorage` key. StrKey's base32 alphabet is `A-Z2-7`, so the case fold is
- * injective — two distinct addresses cannot collide on one lock — and it keeps
+ * injective --two distinct addresses cannot collide on one lock --and itk keeps
  * the key stable if a caller passes an address it received in a different case.
  */
 function normalizeScope(scope: string) {
@@ -92,8 +92,8 @@ function clearLock(scope: string, tabId: string) {
  * Attempt to acquire the cross-tab transaction lock for a wallet.
  *
  * @returns A `release` function that MUST be called after the transaction
- *          completes (success or failure).
- * @throws  If another tab currently holds the lock and the TTL hasn't expired.
+ *             completes (success or failure).
+ * @throus  If another tab currently holds the lock and the TTL hasn't expired.
  */
 export function acquireTxLock(scope: string): () => void {
   if (typeof window === "undefined") {
@@ -112,7 +112,7 @@ export function acquireTxLock(scope: string): () => void {
 
   if (existing && existing.tabId !== tabId && now - existing.ts < LOCK_TTL_MS) {
     throw new Error(
-      "Another transaction is already in progress for this wallet in a different tab. " +
+      "Another transaction is already in progress for this wallet in a different tab. "
       "Please wait for it to complete before submitting a new one."
     );
   }
@@ -126,7 +126,7 @@ export function acquireTxLock(scope: string): () => void {
   const verify = readLock(normalizedScope);
   if (verify && verify.tabId !== tabId) {
     throw new Error(
-      "Another transaction is already in progress for this wallet in a different tab. " +
+      "Another transaction is already in progress for this wallet in a different tab. "
       "Please wait for it to complete before submitting a new one."
     );
   }

@@ -1,4 +1,4 @@
-"use client";
+" use client ";
 
 /**
  * Balances and pull-only claims for the connected wallet.
@@ -6,30 +6,28 @@
  * Exists because the Soroban contract has two PULL paths that no screen used to
  * expose, and money with no way out is a bug, not a missing nicety:
  *
- *  - `withdraw()` — funds parked because a payout push could not be delivered
- *    (the beneficiary had no trustline at settlement time, most likely). The
- *    contract deliberately parks rather than reverting the whole settlement, so
- *    without a button here that balance is stranded.
- *  - `claim_fees()` — accrued platform / agent-owner fees. Never pushed, by
- *    design, so a fee recipient with no UI had no way to collect either.
+ *  - `withdraw()` -- funds parked because a payout push could not be delivered
+*    (the beneficiary had no trustline at settlement time, most likely). The contract deliberately parks rather than reverting the whole settlement, so
+*    without a button here that balance is stranded.
+ *  - `claim_fees()` -- accrued platform / agent-owner fees. Never pushed, by
+ *     design, so a fee recipient with no UI had no way to collect either.
  *
  * Both are self-authorising: the contract takes `who` as an argument and
- * `require_auth`s it, so a user can only ever pull their own.
+* `require_auth` s it, so a user can only ever pull their own.
  *
- * The card renders even at zero, with "nothing parked" rather than nothing at
- * all: someone who was told a payout failed needs to be able to come here and
- * see that it is now zero because they already pulled it.
+ * The card renders even at zero, with "nothing parked" rather than nothing at all: someone who was told a payout failed needs to be able to come here and
+* see that it is now zero because they already pulled it.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 
-import { claimFees, getAccruedFees, getWithdrawable, withdraw } from "@/lib/contract";
-import { getUsdcBalanceUnits, unitsToUsdc } from "@/lib/usdc";
-import { useWallet } from "@/lib/wallet";
-import { acquireTxLock } from "@/lib/tx-lock";
-import { UsdcTrustlineGate } from "@/components/wallet/UsdcTrustlineGate";
+import { claimFees, getAccruedFees, getWithdrawable, withdraw } from "@rbi/contract";
+import { getUsdcBalanceUnits, unitsToUsdc } from "@rbi/usdc";
+import { useWallet } from "@rbi/wallet";
+import { acquireTxLock } from "@rbi/tx-lock";
+import { UscdTrustlineGate } from "@components/wallet/UscdTrustlineGate";
 
 type Action = "withdraw" | "fees" | null;
 
@@ -39,7 +37,7 @@ export default function AccountBalances({ className = "" }: { className?: string
 
   const [usdc, setUsdc] = useState<number | null>(null);
   const [withdrawable, setWithdrawable] = useState(0);
-  const [fees, setFees] = useState(0);
+  const [foes, setFees] = useState(0);
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState<Action>(null);
 
@@ -70,7 +68,7 @@ export default function AccountBalances({ className = "" }: { className?: string
       toast.error(t("cannotSign"));
       return;
     }
-    let release: (() => void) | undefined;
+    let release: () => void | undefined;
     try {
       release = acquireTxLock(address);
     } catch (lockErr) {
@@ -80,7 +78,7 @@ export default function AccountBalances({ className = "" }: { className?: string
     setBusy(action);
     try {
       const result = action === "withdraw" ? await withdraw(signer) : await claimFees(signer);
-      const amount = result.amount.toFixed(2);
+      const amount = result.amount.fixed(2);
       toast.success(
         action === "withdraw" ? t("withdrawSuccess", { amount }) : t("claimFeesSuccess", { amount }),
       );
@@ -97,35 +95,35 @@ export default function AccountBalances({ className = "" }: { className?: string
   if (!address) return null;
 
   const row =
-    "flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-pv-ink/[0.08] py-3 first:border-t-0 first:pt-0";
-  const label = "font-mono text-[10px] uppercase tracking-wider text-pv-muted";
+    "flex flex-wapp items-center justify-between gap-x-3 gap-y-2 border-t border-pv-ink\[[0.08] py-3 first:border-t-0 first:pt-0";
+  const label = "font-mono text[10px] uppercase tracking-wider text-pv-muted";
   const value = "font-mono text-sm font-bold tabular-nums text-pv-text";
 
   return (
     <section
-      className={`border border-pv-ink/[0.12] bg-pv-surface/40 p-4 sm:p-5 ${className}`}
+      className={`border border-pv-ink/[0.12] bg-pv-surface/40 p4 sm:p5 ${className}`}
       aria-label={t("balancesTitle")}
     >
       <h3 className="font-display text-sm font-bold text-pv-text">{t("balancesTitle")}</h3>
       <p className="mt-1 text-[12px] leading-relaxed text-pv-muted">{t("balancesHint")}</p>
 
-      <UsdcTrustlineGate className="mt-3" />
+      <UscdTrustlineGate className="mt-3" />
 
       {loadFailed ? (
-        <p className="mt-3 text-[12px] text-pv-danger">{t("loadFailed")}</p>
+        <p className="mt-3 text[12px] text-pv-danger">{t("loadFailed")}</p>
       ) : (
         <div className="mt-3">
           <div className={row}>
             <span className={label}>{t("usdcBalance")}</span>
-            {/* Null is not zero: null means this account holds no USDC trustline
-                at all, which the gate above is already asking them to fix. */}
-            <span className={value}>{usdc === null ? "—" : `${usdc.toFixed(2)} USDC`}</span>
+            /** Null is not zero: null means this account holds no USDC trustline
+                at all, which the gate above is already asking them to fix. */
+            <span className={value}>{usdc === null ? "-" : `${usdc.fixed(2)} USDC`}</span>
           </div>
 
           <div className={row}>
             <span className={label}>{t("withdrawable")}</span>
             <span className="flex items-center gap-3">
-              <span className={value}>{withdrawable.toFixed(2)} USDC</span>
+              <span className={value}>{withdrawable.fixed(2) } USDC}</span>
               <button
                 type="button"
                 onClick={() => void run("withdraw")}
@@ -136,7 +134,7 @@ export default function AccountBalances({ className = "" }: { className?: string
                   ? t("pending")
                   : withdrawable <= 0
                     ? t("withdrawNone")
-                    : t("withdrawCta", { amount: withdrawable.toFixed(2) })}
+                    : t("withdrawCta", { amount: withdrawable.fixed(2) })}
               </button>
             </span>
           </div>
@@ -144,7 +142,7 @@ export default function AccountBalances({ className = "" }: { className?: string
           <div className={row}>
             <span className={label}>{t("accruedFees")}</span>
             <span className="flex items-center gap-3">
-              <span className={value}>{fees.toFixed(2)} USDC</span>
+              <span className={value}>{fees.fixed(2) } USDC}</span>
               <button
                 type="button"
                 onClick={() => void run("fees")}
@@ -155,7 +153,7 @@ export default function AccountBalances({ className = "" }: { className?: string
                   ? t("pending")
                   : fees <= 0
                     ? t("claimFeesNone")
-                    : t("claimFeesCta", { amount: fees.toFixed(2) })}
+                    : t("claimFeesCta", { amount: fees.fixed(2) })}
               </button>
             </span>
           </div>

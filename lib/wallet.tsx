@@ -209,6 +209,13 @@ export interface WalletContextValue {
   /** Set when the wallet reports a different network than Mimir submits to. */
   networkWarning: string | null;
 
+  /**
+   * Transaction lifecycle state for the most recent user-initiated action.
+   * Used by confirmation polling and feedback UI to show loading, invalid,
+   * stale, disconnected, or dependency-failure states.
+   */
+  transactionState: TransactionState | null;
+
   /** Rows for the picker modal, already ordered. */
   wallets: ModalWallet[];
 }
@@ -218,6 +225,544 @@ type ModalWallet = ShapedWallet & { connect: () => void };
 const NO_WALLET = "Connect a Stellar wallet first.";
 
 const Ctx = createContext<WalletContextValue>({
+  transactionState: null,
+  address: null,
+  isConnected: false,
+  isConnecting: false,
+  connect: async () => {},
+  disconnect: () => {},
+  error: null,
+  signTransaction: async () => {
+    throw new Error(NO_WALLET);
+  },
+  signAuthEntry: async () => {
+    throw new Error(NO_WALLET);
+  },
+  signMessage: async () => {
+    throw new Error(NO_WALLET);
+  },
+  signer: null,
+  walletName: null,
+  canSignMessages: false,
+  canSignAuthEntries: false,
+  networkWarning: null,
+  wallets: [],
+});
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Lifecycle states for wallet-initiated transactions.
+ *
+ * - `null`: No active transaction feedback.
+ * - `"loading"`: Transaction submitted, awaiting confirmation or failure.
+ * - `"invalid"`: Transaction structure or signature failed validation before submission.
+ * - `"stale"`: Transaction confirmed on-chain but the wallet session lost sync (e.g. reconnect).
+ * - `"disconnected"`: Wallet disconnected during a pending transaction.
+ * - `"dependency-failure"`: A required upstream step (e.g. trustline) failed.
+ */
+export type TransactionState =
+  | "loading"
+  | "invalid"
+  | "stale"
+  | "disconnected"
+  | "dependency-failure";
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+
+function WalletMark({ wallet }: { wallet: ModalWallet }) {
+  if (wallet.icon) {
+    return (
+      // Kit-supplied data URI / CDN mark; next/image would only put a loader in
+      // front of it, and the kit already ships these at the size we render.
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src={wallet.icon} alt="" aria-hidden className="h-7 w-7 shrink-0 rounded-md" />
+    );
+  }
+  return (
+    <span
+      aria-hidden
+      className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-pv-ink/[0.14] font-mono text-[12px] font-bold text-pv-muted"
+    >
+      {wallet.monogram}
+    </span>
+  );
+}
+
+function WalletRow({
+  wallet,
+  isPending,
+  featured,
+}: {
+  wallet: ModalWallet;
+  isPending: boolean;
+  featured: boolean;
+}) {
+  const subtitle = subtitleFor(wallet);
+  const badge = badgeFor(wallet);
+  const installUrl = installUrlFor(wallet);
+
+  const shell = `flex w-full items-center gap-3 border px-4 py-3 text-left transition-colors duration-150 disabled:opacity-50 ${
+    featured
+      ? "border-pv-emerald/45 bg-pv-emerald/[0.08] hover:border-pv-emerald hover:bg-pv-emerald/[0.14]"
+      : "border-pv-ink/[0.12] bg-pv-surface2/60 hover:border-pv-emerald/50 hover:bg-pv-surface2"
+  }`;
+
+  const body = (
+    <>
+      <WalletMark wallet={wallet} />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium text-pv-text">{labelFor(wallet)}</span>
+        </span>
+        {subtitle && (
+          <span className="mt-0.5 block truncate text-[11px] text-pv-muted">{subtitle}</span>
+        )}
+      </span>
+      {badge && (
+        <span className="shrink-0 font-mono text-[9px] uppercase tracking-wider text-pv-muted">
+          {badge}
+        </span>
+      )}
+    </>
+  );
+
+  // A wallet that is not installed cannot be connected to, so the row becomes a
+  // link to its site rather than a button that fails. Silently doing nothing is
+  // how "the connect button is broken" reports happen.
+  if (installUrl) {
+    return (
+      <a href={installUrl} target="_blank" rel="noreferrer" className={shell}>
+        {body}
+      </a>
+    );
+  }
+
+  return (
+    <button type="button" disabled={isPending} onClick={wallet.connect} className={shell}>
+      {body}
+    </button>
+  );
+}
+
+function WalletPickerModal({
+  open,
+  onClose,
+  wallets,
+  isPending,
+  loading,
+  error,
+}: {
+  open: boolean;
+  onClose: () => void;
+  wallets: ModalWallet[];
+  isPending: boolean;
+  loading: boolean;
+  error: string | null;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Escape closes: a modal that can only be dismissed by clicking the backdrop
+  // traps anyone on a keyboard.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    dialogRef.current?.focus();
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  // The top row is whatever the ordering already decided is most likely right:
+  // the in-app browser you are inside, or the wallet you used last.
+  const [primary, ...rest] = wallets;
+  const ready = rest.filter((wallet) => wallet.installed);
+  const notInstalled = rest.filter((wallet) => !wallet.installed);
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Connect wallet"
+        className="w-full max-w-sm border border-pv-border/40 bg-pv-bg p-5 shadow-2xl outline-none"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-1 flex items-center justify-between">
+          <h2 className="font-display text-lg font-bold text-pv-text">Connect wallet</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-2 py-1 text-sm text-pv-muted transition-colors hover:text-pv-text"
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <p className="mb-4 font-mono text-[11px] uppercase tracking-wider text-pv-muted">
+          Stellar · {STELLAR_NETWORK}
+        </p>
+
+        <div className="space-y-2">
+          {loading && wallets.length === 0 && (
+            <p className="text-sm text-pv-muted">Looking for wallets…</p>
+          )}
+
+          {primary && <WalletRow wallet={primary} isPending={isPending} featured />}
+
+          {ready.map((wallet) => (
+            <WalletRow key={wallet.id} wallet={wallet} isPending={isPending} featured={false} />
+          ))}
+
+          {notInstalled.length > 0 && (
+            <details className="group">
+              <summary className="cursor-pointer list-none border border-pv-ink/[0.12] px-4 py-2.5 text-center font-mono text-[11px] uppercase tracking-wider text-pv-muted transition-colors hover:border-pv-ink/[0.25] hover:text-pv-text">
+                Don&apos;t have one? ({notInstalled.length})
+              </summary>
+              <div className="mt-2 space-y-2">
+                {notInstalled.map((wallet) => (
+                  <WalletRow
+                    key={wallet.id}
+                    wallet={wallet}
+                    isPending={isPending}
+                    featured={false}
+                  />
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+
+        {error && (
+          <p className="mt-3 text-xs text-pv-danger">
+            {error === "rejected"
+              ? "Connection rejected in wallet."
+              : "Could not connect. Try another wallet."}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Provider ──────────────────────────────────────────────────────────────────
+
+export function WalletProvider({ children }: { children: React.ReactNode }) {
+  const [address, setAddress] = useState<string | null>(null);
+  const [walletId, setWalletId] = useState<string | null>(null);
+  const [walletName, setWalletName] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [networkWarning, setNetworkWarning] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerLoading, setPickerLoading] = useState(false);
+  const [options, setOptions] = useState<ShapedWallet[]>([]);
+  const [recentId, setRecentId] = useState<string | null>(null);
+  const [transactionState, setTransactionState] = useState<TransactionState | null>(null);
+
+  // Read by the signing callbacks, which must stay referentially stable so the
+  // memoised `signer` does not change identity on every render.
+  const addressRef = useRef<string | null>(null);
+  addressRef.current = address;
+
+  /**
+   * Restore a previous session without prompting.
+   *
+   * The kit persists the selected module id and the address it last resolved, so
+   * a reload can adopt them silently — asking a returning user to approve the
+   * same extension again on every navigation is the thing the recent-wallet hint
+   * exists to avoid. Nothing here can open a wallet UI: `getAddress` reads the
+   * kit's memory, unlike `fetchAddress`, which asks the extension.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const remembered = readRecentWallet();
+      if (!cancelled) setRecentId(remembered);
+      try {
+        const kit = await loadKit();
+        if (remembered) {
+          try {
+            kit.setWallet(remembered);
+          } catch {
+            // The remembered wallet is no longer one of our modules.
+          }
+        }
+        const { address: restored } = await kit.getAddress();
+        if (cancelled || !restored) return;
+        setAddress(restored);
+        setWalletId(kit.selectedModule.productId);
+        setWalletName(kit.selectedModule.productName);
+      } catch {
+        // No persisted session, or nothing selected. Stay disconnected.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Best-effort network check.
+   *
+   * Not every wallet answers `getNetwork` — Albedo, xBull and Lobstr all reject
+   * it outright — so a failure here means "unknown", never "wrong". A real
+   * mismatch is a warning rather than a block: the user can still read the app,
+   * and the signature is what actually fails.
+   */
+  useEffect(() => {
+    if (!address) {
+      setNetworkWarning(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const kit = await loadKit();
+        const { networkPassphrase } = await kit.getNetwork();
+        if (cancelled || !networkPassphrase) return;
+        setNetworkWarning(
+          networkPassphrase === NETWORK_PASSPHRASE
+            ? null
+            : `Your wallet is on a different Stellar network. Switch it to ${STELLAR_NETWORK} before staking.`,
+        );
+      } catch {
+        if (!cancelled) setNetworkWarning(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [address]);
+
+  // ── Signing ────────────────────────────────────────────────────────────────
+
+  const signTransaction = useCallback<SignTransaction>(async (xdr, opts) => {
+    // SEP-43 has an optional "sign and submit for me" mode that the SDK's
+    // SignTransaction type exposes and the kit's per-module `signTransaction`
+    // does not implement — it would silently drop the flag and hand back an
+    // unsubmitted envelope, which reads as "the transaction vanished". Mimir
+    // always submits through Soroban RPC itself, so nothing sets this today;
+    // refusing it keeps a future caller from finding out the hard way.
+    if (opts?.submit) {
+      throw new Error(
+        "This wallet layer does not sign-and-submit; submit the signed transaction through Soroban RPC.",
+      );
+    }
+    const kit = await loadKit();
+    const signerAddress = opts?.address ?? addressRef.current ?? undefined;
+    try {
+      const signed = await kit.signTransaction(xdr, {
+        networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
+        ...(signerAddress ? { address: signerAddress } : {}),
+      });
+      return { signedTxXdr: signed.signedTxXdr, signerAddress: signed.signerAddress };
+    } catch (cause) {
+      const err = toWalletError(cause, "sign this transaction");
+      // A wallet pointed at the wrong network signs over the wrong passphrase and
+      // reports it as a generic failure. Say what to check, rather than surfacing
+      // "Error: -3" and letting the user guess.
+      if (/network|passphrase/i.test(err.message)) {
+        throw new Error(
+          `${err.message} — check that your wallet is set to Stellar ${STELLAR_NETWORK}.`,
+        );
+      }
+      throw err;
+    }
+  }, []);
+
+  const signAuthEntry = useCallback<SignAuthEntry>(async (authEntry, opts) => {
+    const kit = await loadKit();
+    const signerAddress = opts?.address ?? addressRef.current ?? undefined;
+    try {
+      const signed = await kit.signAuthEntry(authEntry, {
+        networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
+        ...(signerAddress ? { address: signerAddress } : {}),
+      });
+      return { signedAuthEntry: signed.signedAuthEntry, signerAddress: signed.signerAddress };
+    } catch (cause) {
+      throw toWalletError(cause, "sign this authorization");
+    }
+  }, []);
+
+  const signMessage = useCallback(async (message: string) => {
+    const kit = await loadKit();
+    const signerAddress = addressRef.current ?? undefined;
+    try {
+      const signed = await kit.signMessage(message, {
+        networkPassphrase: NETWORK_PASSPHRASE,
+        ...(signerAddress ? { address: signerAddress } : {}),
+      });
+      if (!signed.signedMessage) throw new Error("The wallet returned no signature.");
+      return signed.signedMessage;
+    } catch (cause) {
+      throw toWalletError(cause, "sign this message");
+    }
+  }, []);
+
+  /**
+   * The signer handed to `lib/contract.ts`.
+   *
+   * `signAuthEntry` is only attached when the connected wallet actually
+   * implements it. Attaching a callback that always rejects would make
+   * `AssembledTransaction` believe co-signing is possible and fail deep inside
+   * the SDK instead of at a place with something useful to say.
+   */
+  const signer = useMemo<StellarSigner | null>(() => {
+    if (!address) return null;
+    return {
+      publicKey: address,
+      signTransaction,
+      ...(supportsAuthEntrySigning(walletId) ? { signAuthEntry } : {}),
+    };
+  }, [address, walletId, signTransaction, signAuthEntry]);
+
+  // ── Connect / disconnect ───────────────────────────────────────────────────
+
+  const refreshOptions = useCallback(async () => {
+    setPickerLoading(true);
+    try {
+      const kit = await loadKit();
+      const supported = await kit.refreshSupportedWallets();
+      setOptions(
+        shapeWalletOptions(
+          supported.map((wallet) => ({
+            id: wallet.id,
+            name: wallet.name,
+            icon: wallet.icon,
+            url: wallet.url,
+            type: wallet.type,
+            isAvailable: wallet.isAvailable,
+            isPlatformWrapper: wallet.isPlatformWrapper,
+          })),
+          { recentId: readRecentWallet() },
+        ),
+      );
+    } catch (cause) {
+      console.warn("[wallet] could not list wallets", cause);
+      setOptions([]);
+    } finally {
+      setPickerLoading(false);
+    }
+  }, []);
+
+  const connectWallet = useCallback(
+    async (id: string) => {
+      setIsConnecting(true);
+      setError(null);
+      try {
+        const kit = await loadKit();
+        kit.setWallet(id);
+        // `fetchAddress`, not `getAddress`: this is the one place the extension
+        // should be asked, because this is the click that asked for it.
+        const { address: connected } = await kit.fetchAddress();
+        setAddress(connected);
+        setWalletId(kit.selectedModule.productId);
+        setWalletName(kit.selectedModule.productName);
+        rememberWallet(id);
+        setRecentId(id);
+        setPickerOpen(false);
+      } catch (cause) {
+        const err = toWalletError(cause, "connect");
+        setError(isRejection(err.message) ? "rejected" : "error");
+      } finally {
+        setIsConnecting(false);
+      }
+    },
+    [],
+  );
+
+  const connect = useCallback(async () => {
+    setError(null);
+    setPickerOpen(true);
+    await refreshOptions();
+  }, [refreshOptions]);
+
+  const disconnect = useCallback(() => {
+    setAddress(null);
+    setWalletId(null);
+    setWalletName(null);
+    setNetworkWarning(null);
+    // The recent-wallet hint deliberately survives: it is what makes coming back
+    // one tap. Only the session is cleared.
+    void loadKit()
+      .then((kit) => kit.disconnect())
+      .catch(() => undefined);
+  }, []);
+
+  const wallets = useMemo<ModalWallet[]>(
+    () =>
+      options.map((wallet) => ({
+        ...wallet,
+        recent: wallet.id === recentId,
+        connect: () => void connectWallet(wallet.id),
+      })),
+    [options, recentId, connectWallet],
+  );
+
+  const value = useMemo<WalletContextValue>(
+    () => ({
+      address,
+      isConnected: Boolean(address),
+      isConnecting,
+      connect,
+      disconnect,
+      error,
+      signTransaction,
+      signAuthEntry,
+      signMessage,
+      signer,
+      walletName,
+      canSignMessages: supportsMessageSigning(walletId),
+      canSignAuthEntries: supportsAuthEntrySigning(walletId),
+      networkWarning,
+      wallets,
+      transactionState,
+    }),
+    [
+      address,
+      isConnecting,
+      connect,
+      disconnect,
+      error,
+      signTransaction,
+      signAuthEntry,
+      signMessage,
+      signer,
+      walletName,
+      walletId,
+      networkWarning,
+      wallets,
+      transactionState,
+    ],
+  );
+
+  return (
+    <Ctx.Provider value={value}>
+      {children}
+      <WalletPickerModal
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        wallets={wallets}
+        isPending={isConnecting}
+        loading={pickerLoading}
+        error={error}
+      />
+    </Ctx.Provider>
+  );
+}
+
+export function useWallet(): WalletContextValue {
+  return useContext(Ctx);
+}
   address: null,
   isConnected: false,
   isConnecting: false,

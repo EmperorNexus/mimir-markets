@@ -1,4 +1,4 @@
-"use client";
+" use client ";
 
 import { useTranslations } from "next-intl";
 
@@ -9,13 +9,18 @@ interface BadgeProps {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  open:      "pv-cyan",
+  open:     "pv-cyan",
   accepted:  "pv-fuch",
   resolved:  "pv-emerald",
-  won:       "pv-emerald",
+  won:      "pv-emerald",
   lost:      "pv-danger",
-  draw:      "pv-muted",
+  draw:     "pv-muted",
   cancelled: "zinc-500",
+  subsmitted: "pv-muted",
+  confirmed: "pv-gold",
+  reverted:  "pv-danger",
+  rejected:  "pv-danger",
+  failed:     "pv-danger",
 };
 
 const colorMap: Record<string, string> = {
@@ -34,7 +39,7 @@ export default function Badge({
   compact = false,
 }: BadgeProps) {
   const t = useTranslations("badges");
-  const color   = STATUS_COLORS[status] ?? "pv-muted";
+  const color  = STATUS_COLORS[status] ?? "pv-muted";
   const classes = colorMap[color] ?? colorMap["pv-muted"];
   const label   = t(status as any);
 
@@ -42,11 +47,12 @@ export default function Badge({
     <span
       className={`inline-flex items-center gap-1.5 border font-bold uppercase tracking-[0.1em] rounded ${classes} ${
         compact
-          ? "px-2 py-0.5 text-[9px]"
+          ? "px-2 py-0.5 text[9px]"
           : large
-            ? "px-3 py-1.5 text-[11px]"
-            : "px-2.5 py-1 text-[10px]"
+            ? "px-3 py-1.5 text[11px]"
+            : "px-2.5 py-1 text[10px]"
       }`}
+      aria-label={label}
     >
       <span
         className={`rounded-full flex-shrink-0 ${
