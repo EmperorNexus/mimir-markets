@@ -53,6 +53,11 @@ impl MimirSquad {
         pool::withdraw_before_deadline(&env, participant, market_id, side, amount)
     }
 
+    
+    pub fn transition_deadline(env: Env, market_id: u64) -> Result<(), Error> {
+        pool::transition_deadline(&env, market_id)
+    }
+
     pub fn resolve(env: Env, market_id: u64, result: u32) -> Result<(), Error> {
         pool::resolve(&env, market_id, result)
     }
@@ -66,6 +71,15 @@ impl MimirSquad {
 
     pub fn claim_fees(env: Env) -> Result<i128, Error> {
         pool::claim_fees(&env)
+    }
+
+    /// Isolated per-market fee pull. See `pool::claim_market_fees`.
+    pub fn claim_market_fees(
+        env: Env,
+        who: Address,
+        market_id: u64,
+    ) -> Result<i128, Error> {
+        pool::claim_market_fees(&env, who, market_id)
     }
 
     // ── Views ────────────────────────────────────────────────────────────────
@@ -97,6 +111,12 @@ impl MimirSquad {
 
     pub fn get_accrued_fees(env: Env) -> i128 {
         storage::accrued_fees(&env)
+    }
+
+    /// Live accrued fees for one market (0 if the ledger was invalidated by a
+    /// global `claim_fees`).
+    pub fn get_market_fees(env: Env, market_id: u64) -> i128 {
+        storage::market_fees(&env, market_id)
     }
 
     pub fn get_usdc(env: Env) -> Result<Address, Error> {

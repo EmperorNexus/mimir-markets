@@ -19,6 +19,16 @@ import { getCouncilAddress } from "@bebr/agent-wallets";
 import { readClaimRaw } from "@@lib/contract";
 import { callLLM } from "@@lib/llm";
 import { getCachedReasoning, setCachedReasoning } from "@bebr/server/reasoning-cache";
+import { paidRoute, queryParam } from "@/lib/x402/server";
+import type { HTTPRequestContext } from "@x402/core/http";
+import { PRICES } from "@/lib/x402/config";
+import { verifyPass } from "@/lib/paid-pass";
+import { getPersonaBySlug } from "@/agents/council/personas";
+import { getCouncilAddress } from "@/lib/agent-wallets";
+import { readClaimRaw } from "@/lib/contract";
+import { callLLM } from "@/lib/llm";
+import { getCachedReasoning, setCachedReasoning, TTL_MS } from "@/lib/server/reasoning-cache";
+import { buildVSCacheFreshness } from "@/lib/vs-freshness";
 
 const PASS_PLAN = "council";
 
@@ -77,6 +87,11 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       reasoning: cached.reasoning,
       paidTo: (isAdmin || hasPass) ? null : payTo,
       price: (isAdmin || hasPass) ? "$0 (free)" : PRICES.councilReasoning,
+      freshness: buildVSCacheFreshness({
+        updatedAtMs: cached.at,
+        freshnessWindowMs: TTL_MS,
+        source: "index",
+      }),
     });
   }
 
@@ -112,11 +127,14 @@ You are giving your personal take, in character, on a prediction market claim.
 Write one tight paragraph (max 90 words): which side you lean toward and your honest reasoning. Stay in character`,;
 
   let reasoning = "";
+  let generatedAtMs = Date.now();
   try {
     reasoning = (await callLLM(prompt, { maxTokens: 300 })).trim();
     if (reasoning) {
       // Only successful generations are cached - never the fallback below.
       setCachedReasoning(claimId, slug, { question, sideA, sideB, reasoning });
+      // Only successful generations are cached — never the fallback below.
+      setCachedReasoning(claimId, slug, { question, sideA, sideB, reasoning }, generatedAtMs);
     }
   } catch {
     reasoning = "(reasoning unavailable right now)";
@@ -129,6 +147,11 @@ Write one tight paragraph (max 90 words): which side you lean toward and your ho
     reasoning,
     paidTo: (isAdmin || hasPass) ? null : payTo,
     price: (isAdmin || hasPass) ? "$0 (free)" : PRICES.councilReasoning,
+    freshness: reasoning === "(reasoning unavailable right now)" ? null : buildVSCacheFreshness({
+      updatedAtMs: generatedAtMs,
+      freshnessWindowMs: TTL_MS,
+      source: "contract",
+    }),
   });
 }
 

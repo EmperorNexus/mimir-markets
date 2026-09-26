@@ -1,4 +1,9 @@
 //! Market lifecycle: create, deposit, withdraw, resolve, claim.
+//!
+//! Fee claiming is isolated per market: each claim accrues into a
+//! per-market ledger, `claim_market_fees` pulls one market without
+//! touching others, and global `claim_fees` invalidates every market
+//! ledger in O(1) via a claim-seq bump (Soroban footprint safe).
 
 use soroban_sdk::{Address, Env, String};
 
@@ -295,7 +300,12 @@ pub fn claim(
     storage::set_market(env, market_id, &market);
 
     let net = gross - fee;
-    storage::set_accrued_fees(env, storage::accrued_fees(env) + fee);
+    // Isolate fee accrual per market, and keep the global total in sync so
+    // `get_accrued_fees` / `claim_fees` stay O(1) and compatible.
+    if fee > 0 {
+        storage::add_market_fees(env, market_id, fee);
+        storage::set_accrued_fees(env, storage::accrued_fees(env) + fee);
+    }
 
     let usdc = storage::usdc(env)?;
     escrow::push(env, &usdc, &participant, net);
@@ -311,6 +321,10 @@ pub fn claim(
     Ok(net)
 }
 
+/// Pull every accrued fee in one shot. Compatible with existing callers.
+///
+/// Bumps `fee_claim_seq` so every per-market ledger is invalidated without
+/// walking storage — a later `claim_market_fees` cannot double-pay.
 pub fn claim_fees(env: &Env) -> Result<i128, Error> {
     let recipient = storage::fee_recipient(env)?;
     recipient.require_auth();
@@ -320,11 +334,50 @@ pub fn claim_fees(env: &Env) -> Result<i128, Error> {
         return Err(Error::NoFees);
     }
     storage::set_accrued_fees(env, 0); // effects before interaction
+    storage::bump_fee_claim_seq(env); // isolate: invalidate per-market ledgers
 
     let usdc = storage::usdc(env)?;
     escrow::push(env, &usdc, &recipient, amount);
 
     events::FeesClaimed {
+        recipient,
+        amount,
+    }
+    .publish(env);
+    Ok(amount)
+}
+
+/// Pull fees for a single market. Leaves every other market's ledger untouched
+/// so fee claiming is isolated across markets.
+///
+/// `who` must be the configured fee recipient (mirrors mimir-market's explicit
+/// claimant argument and exercises `NotFeeRecipient`).
+pub fn claim_market_fees(env: &Env, who: Address, market_id: u64) -> Result<i128, Error> {
+    who.require_auth();
+    let recipient = storage::fee_recipient(env)?;
+    if who != recipient {
+        return Err(Error::NotFeeRecipient);
+    }
+    // Confirm the market exists (and bump its TTL) before money moves.
+    let _market = storage::get_market(env, market_id)?;
+
+    let amount = storage::take_market_fees(env, market_id);
+    if amount <= 0 {
+        return Err(Error::NoFees);
+    }
+
+    let global = storage::accrued_fees(env);
+    // Conservation: per-market take cannot exceed the global total.
+    if amount > global {
+        return Err(Error::Overflow);
+    }
+    storage::set_accrued_fees(env, global - amount); // effects before interaction
+
+    let usdc = storage::usdc(env)?;
+    escrow::push(env, &usdc, &recipient, amount);
+
+    events::MarketFeesClaimed {
+        market_id,
         recipient,
         amount,
     }

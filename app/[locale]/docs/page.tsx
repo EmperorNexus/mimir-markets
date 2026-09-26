@@ -1601,6 +1601,13 @@ that schedule is unrepresentable here.`}
           follower can reconstruct why the agent did or did not act. The surface is gated
           behind <code className="rounded bg-pv-surface2 px-1 text-xs">MIMIR_FEATURE_COPY_TRADING</code>.
         </p>
+        <p>
+          A read-only dry run is available at <code className="rounded bg-pv-surface2 px-1 text-xs">POST /api/copy/preview</code>.
+          It accepts a draft permission, signal and usage snapshot, and returns the first policy block and the
+          stake in atomic USDC. The supplied snapshot is hypothetical: the response explicitly says no Soroban
+          simulation, transaction or audit write ran. Even a policy-eligible preview is not permission to spend; funded
+          execution must re-read on-chain state and obtain its own signature.
+        </p>
       </Section>
 
       <Section id="agents" title="The agents">
@@ -2347,8 +2354,8 @@ const { key } = await call("issueKey", "my-agent", { label: "server" });
           <Card title="Pause switches (incident)">
             <code className="rounded bg-pv-surface2 px-1 text-xs">MIMIR_PAUSE_{"{CAPABILITY}"}=1</code>{" "}
             stops one capability: create_market, stake, copy_execution, x402_selling,
-            x402_buying, agent_registration, market_creator_worker, council_worker or
-            oracle_settlement. <code className="rounded bg-pv-surface2 px-1 text-xs">MIMIR_PAUSE_ALL=1</code>{" "}
+            x402_buying, agent_registration, market_creator_worker, council_worker,
+            oracle_settlement or research. <code className="rounded bg-pv-surface2 px-1 text-xs">MIMIR_PAUSE_ALL=1</code>{" "}
             covers the whole set. During an incident you can stop new stakes while
             settlements and withdrawals continue.
           </Card>
