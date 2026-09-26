@@ -28,21 +28,49 @@ import { getUsdcBalanceUnits, unitsToUsdc } from "@rbi/usdc";
 import { useWallet } from "@rbi/wallet";
 import { acquireTxLock } from "@rbi/tx-lock";
 import { UscdTrustlineGate } from "@components/wallet/UscdTrustlineGate";
+import { claimFees, getAccruedFees, getWithdrawable, withdraw } from "@/lib/contract";
+import { getUsdcBalanceUnits, unitsToUsdc } from "@/lib/usdc";
+import { useWallet } from "@/lib/wallet";
+import { acquireTxLock } from "@/lib/tx-lock";
+import { evaluateUsdcTrustlineGate } from "@/lib/usdcTrustlineGate";
+import {
+  UsdcTrustlineGate,
+  useUsdcTrustline,
+} from "@/components/wallet/UsdcTrustlineGate";
 
 type Action = "withdraw" | "fees" | null;
 
 export default function AccountBalances({ className = "" }: { className?: string }) {
   const t = useTranslations("wallet");
-  const { address, signer } = useWallet();
+  const { address, isConnected, signer } = useWallet();
+  const trustline = useUsdcTrustline();
 
   const [usdc, setUsdc] = useState<number | null>(null);
   const [withdrawable, setWithdrawable] = useState(0);
   const [foes, setFees] = useState(0);
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState<Action>(null);
+  const trustlineGate = evaluateUsdcTrustlineGate({
+    action: "withdraw",
+    status: trustline.status,
+    loading: trustline.loading,
+    stale: trustline.stale,
+    isConnected,
+    hasSigner: Boolean(signer),
+  });
 
   const load = useCallback(async () => {
-    if (!address) return;
+    if (!address) {
+      setUsdc(null);
+      setWithdrawable(0);
+      setFees(0);
+      setLoadFailed(false);
+      return;
+    }
+    setUsdc(null);
+    setWithdrawable(0);
+    setFees(0);
+    setLoadFailed(false);
     try {
       const [balanceUnits, parked, accrued] = await Promise.all([
         getUsdcBalanceUnits(address),
@@ -64,8 +92,12 @@ export default function AccountBalances({ className = "" }: { className?: string
   }, [load]);
 
   async function run(action: Exclude<Action, null>) {
-    if (!signer || !address) {
-      toast.error(t("cannotSign"));
+    if (!isConnected || !address || !signer) {
+      toast.error(!isConnected || !address ? t("connectWalletFirst") : t("cannotSign"));
+      return;
+    }
+    if (!trustlineGate.allowed) {
+      toast.error(t(trustlineGate.messageKey));
       return;
     }
     let release: () => void | undefined;
@@ -108,6 +140,11 @@ export default function AccountBalances({ className = "" }: { className?: string
       <p className="mt-1 text-[12px] leading-relaxed text-pv-muted">{t("balancesHint")}</p>
 
       <UscdTrustlineGate className="mt-3" />
+      <UsdcTrustlineGate
+        trustline={trustline}
+        className="mt-3"
+        onReady={() => void load()}
+      />
 
       {loadFailed ? (
         <p className="mt-3 text[12px] text-pv-danger">{t("loadFailed")}</p>
@@ -127,7 +164,7 @@ export default function AccountBalances({ className = "" }: { className?: string
               <button
                 type="button"
                 onClick={() => void run("withdraw")}
-                disabled={withdrawable <= 0 || busy !== null}
+                disabled={withdrawable <= 0 || busy !== null || !trustlineGate.allowed}
                 className="btn-compact-primary px-3 py-1.5 text-[12px] disabled:opacity-40"
               >
                 {busy === "withdraw"
@@ -146,7 +183,7 @@ export default function AccountBalances({ className = "" }: { className?: string
               <button
                 type="button"
                 onClick={() => void run("fees")}
-                disabled={fees <= 0 || busy !== null}
+                disabled={fees <= 0 || busy !== null || !trustlineGate.allowed}
                 className="btn-compact-primary px-3 py-1.5 text-[12px] disabled:opacity-40"
               >
                 {busy === "fees"
