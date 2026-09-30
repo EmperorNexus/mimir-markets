@@ -91,6 +91,7 @@ export class PaymentBudgetExceeded extends Error {
   constructor(
     readonly priceUnits: bigint,
     readonly capUnits: bigint,
+    readonly quoteId?: string,
   ) {
     super(`payment price ${priceUnits} USDC atomic units exceeds budget cap ${capUnits}`);
     this.name = "PaymentBudgetExceeded";
@@ -125,7 +126,7 @@ function budgetPolicy(capUnits: bigint, onRefusal: (error: PaymentBudgetExceeded
         (min, r) => (BigInt(r.amount) < min ? BigInt(r.amount) : min),
         BigInt(onNetwork[0].amount),
       );
-      const refusal = new PaymentBudgetExceeded(cheapest, capUnits);
+      const refusal = new PaymentBudgetExceeded(cheapest, capUnits, cheapest.toString());
       onRefusal(refusal);
       throw refusal;
     }

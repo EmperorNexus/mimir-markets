@@ -75,6 +75,7 @@ export class MimirAgentClient {
   dryRun = (body: unknown) => this.request("dryRun", body);
   publishReasoning = (body: unknown, key?: string) => this.request("publishReasoning", body, key);
   vote = (body: unknown, key?: string) => this.request("vote", body, key);
+  fetchResearch = (body: unknown, key?: string) => this.request("fetchResearch", body, key);
   stake = (body: unknown, key?: string) => this.request("stake", body, key);
   listPositions = () => this.request("listPositions", {});
   listEarnings = () => this.request("listEarnings", {});

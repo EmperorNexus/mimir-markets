@@ -10,8 +10,25 @@ pub const RESULT_CANCELLED: u32 = 3;
 
 pub const MAX_FEE_BPS: u32 = 1_000;
 pub const MAX_PARTICIPANTS_PER_SIDE: u32 = 200;
+/// Hard ceiling on the total number of members across **both** sides of a single
+/// squad market.  This is distinct from [`MAX_PARTICIPANTS_PER_SIDE`], which
+/// caps each side independently.  A squad may never have more than
+/// `MAX_SQUAD_MEMBERS` unique addresses with an open position at any given time.
+///
+/// With two sides of 200 each the combined ceiling is 400, which equals 2 ×
+/// [`MAX_PARTICIPANTS_PER_SIDE`] — the tightest consistent bound without further
+/// restricting the per-side limit.
+pub const MAX_SQUAD_MEMBERS: u32 = 400;
 pub const MIN_DURATION: u64 = 600; // 10 minutes
 pub const MAX_DURATION: u64 = 31_536_000; // 365 days
+
+/// Upper bound on the byte length of a market question.
+///
+/// The question is free text supplied by the captain and carried on the
+/// `MarketCreated` event; it is bounded at the boundary rather than truncated,
+/// so a rejected caller knows to shorten it. Mirrors
+/// `mimir-market::MAX_METADATA_BYTES`.
+pub const MAX_QUESTION_BYTES: u32 = 512;
 
 pub const BPS_DIVISOR: i128 = 10_000;
 
@@ -20,6 +37,9 @@ pub const BPS_DIVISOR: i128 = 10_000;
 /// units, so this is also the scale every share is read at off-chain;
 /// `initialize` refuses a token that reports any other.
 pub const USDC_DECIMALS: u32 = 7;
+
+/// A queued oracle rotation cannot take effect before this much time passes.
+pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 
 // ── Storage shapes ───────────────────────────────────────────────────────────
 
@@ -46,16 +66,6 @@ pub struct ClaimResult {
     pub gross: i128,
     pub fee: i128,
     pub net: i128,
-}
-
-/// Per-market accrued fee ledger. `seq` ties the balance to the current
-/// `fee_claim_seq` so a global `claim_fees` can invalidate every market
-/// ledger without iterating storage (Soroban footprint bound).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MarketFeeBalance {
-    pub amount: i128,
-    pub seq: u64,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -90,4 +100,17 @@ pub enum Error {
     Overflow = 24,
     UnsupportedDecimals = 25,
     ConservationViolation = 26,
+    /// The market question exceeded `MAX_QUESTION_BYTES`. Refused rather than
+    /// truncated.
+    QuestionTooLong = 27,
+    /// All [`MAX_SQUAD_MEMBERS`] slots across both sides have been filled.
+    /// Distinct from [`Error::SideFull`], which fires when a single side reaches
+    /// [`MAX_PARTICIPANTS_PER_SIDE`].  A new depositor is rejected once
+    /// `participants_a + participants_b == MAX_SQUAD_MEMBERS` even if the target
+    /// side still has room.
+    SquadFull = 28,
+    /// A payout could not be delivered because the token transfer trapped
+    /// (frozen or deauthorized trustline). The amount is parked, not lost:
+    /// `claim` succeeds and holds it, `claim_parked_payout` retries it.
+    PayoutParked = 29,
 }

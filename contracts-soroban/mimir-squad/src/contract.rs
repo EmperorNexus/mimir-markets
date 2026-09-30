@@ -6,7 +6,7 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String};
 use crate::escrow;
 use crate::pool;
 use crate::storage;
-use crate::types::{ClaimResult, Error, Market};
+use crate::types::{ClaimResult, Error, Market, PendingOracle};
 
 #[contract]
 pub struct MimirSquad;
@@ -62,6 +62,13 @@ impl MimirSquad {
         pool::resolve(&env, market_id, result)
     }
 
+    /// Captain-initiated market cancellation. Sets the market as resolved with
+    /// result=RESULT_CANCELLED, allowing all depositors to claim full refunds
+    /// via the claim() function. No fees are charged on cancellation.
+    pub fn cancel_market(env: Env, market_id: u64) -> Result<(), Error> {
+        pool::cancel_market(&env, market_id)
+    }
+
     /// Pull-based payout. Solidity used `msg.sender`; Soroban has no equivalent
     /// for a top-level call, so the claimant is an explicit argument that must
     /// authorize. Returns the net amount transferred.
@@ -73,13 +80,16 @@ impl MimirSquad {
         pool::claim_fees(&env)
     }
 
-    /// Isolated per-market fee pull. See `pool::claim_market_fees`.
-    pub fn claim_market_fees(
+    /// Retry a payout that [`Self::claim`] parked because the transfer trapped
+    /// (frozen or deauthorized trustline). Returns the amount moved, or `0`
+    /// when nothing is parked.
+    pub fn claim_parked_payout(
         env: Env,
-        who: Address,
+        participant: Address,
         market_id: u64,
+        side: u32,
     ) -> Result<i128, Error> {
-        pool::claim_market_fees(&env, who, market_id)
+        pool::claim_parked_payout(&env, participant, market_id, side)
     }
 
     // ── Views ────────────────────────────────────────────────────────────────
@@ -113,10 +123,10 @@ impl MimirSquad {
         storage::accrued_fees(&env)
     }
 
-    /// Live accrued fees for one market (0 if the ledger was invalidated by a
-    /// global `claim_fees`).
-    pub fn get_market_fees(env: Env, market_id: u64) -> i128 {
-        storage::market_fees(&env, market_id)
+    /// Payout settled in the ledger but not delivered to one winner, because
+    /// the token transfer trapped. `claim_parked_payout` moves it.
+    pub fn parked_payout(env: Env, market_id: u64, side: u32, who: Address) -> i128 {
+        storage::payout_of(&env, market_id, side, &who)
     }
 
     pub fn get_usdc(env: Env) -> Result<Address, Error> {
@@ -125,6 +135,10 @@ impl MimirSquad {
 
     pub fn get_oracle(env: Env) -> Result<Address, Error> {
         storage::oracle(&env)
+    }
+
+    pub fn get_pending_oracle(env: Env) -> Option<PendingOracle> {
+        storage::pending_oracle(&env)
     }
 
     pub fn get_fee_recipient(env: Env) -> Result<Address, Error> {

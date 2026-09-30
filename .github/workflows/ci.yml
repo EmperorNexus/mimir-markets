@@ -28,12 +28,26 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Verify lockfile reproducibility
+        run: git diff --exit-code package-lock.json
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run check:terms
       - run: npm run check:toolchains
+      - run: npm run check:schema-snapshot
       - run: npm run typecheck
+      # The published agent API contract must be what the live code serves. Fails
+      # if docs/openapi-agent-v1.yaml or schemas/agent-api-v1.schema.json drift;
+      # run `npm run check:openapi -- --write` and commit the result.
+      - run: npm run check:openapi
       - run: npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
       - run: npm run test:smoke
+      - name: test:coverage
+        run: npm run test:coverage
+        env:
+          # Any non-empty value — no production secret required.
+          # paid-pass.ts tests need PASS_SECRET; the in-memory fallback
+          # means DATABASE_URL is not needed.
+          PASS_SECRET: mimir-ci-coverage-test
       - run: npm run build
 
   # Contract tests and wasm builds across the toolchains the contracts support.
@@ -118,10 +132,18 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: .cache/node-tests
+          key: node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('scripts/run-node-tests.mjs') }}
+          restore-keys: |
+            node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-
       - run: npm ci
+      - name: Verify lockfile reproducibility
+        run: git diff --exit-code package-lock.json
       - run: npm run check:terms
       - run: npm run typecheck
-      - run: npm run test:smoke
+      - run: npm run test:node
       - run: npm run smoke:browser
         env:
           CI: "true"

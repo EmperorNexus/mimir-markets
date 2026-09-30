@@ -269,7 +269,7 @@ function printRunbook(profile: FaultProfile, result: ReturnType<typeof runInProc
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-function selectProfiles(): FaultProfile[] {
+function selectProfiles(): readonly FaultProfile[] {
   if (PROFILE_ID) {
     // Validate up front so a typo exits immediately
     try {

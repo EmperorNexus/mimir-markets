@@ -64,10 +64,14 @@ function WalletAccountMenu({
         onClick={() => onOpenChange(!open)}
         aria-expanded={open}
         aria-haspopup="menu"
-        aria-label={t("walletMenu")}
+        aria-label={`${t("walletMenu")}: ${address}`}
         className={buttonClassName}
       >
-        {shortenAddress(address)}
+        {/* The visual label shows the truncated address; screen readers get the
+            full G… strkey via aria-label so the user can verify which wallet is
+            connected without needing to expand the menu. */}
+        <span aria-hidden>{shortenAddress(address)}</span>
+        <span className="sr-only">{address}</span>
       </button>
       <AnimatePresence>
         {open ? (
@@ -296,6 +300,7 @@ export default function Header() {
                   type="button"
                   onClick={connect}
                   disabled={isConnecting}
+                  aria-label={isConnecting ? "Connecting to wallet" : "Connect wallet"}
                   className="btn-compact-primary px-4 py-1.5 text-[13px] focus-ring"
                 >
                   {isConnecting ? "..." : tc("connect")}
@@ -321,6 +326,7 @@ export default function Header() {
                   type="button"
                   onClick={connect}
                   disabled={isConnecting}
+                  aria-label={isConnecting ? "Connecting to wallet" : "Connect wallet"}
                   className="btn-compact-primary px-3 py-1.5 text-[12px]"
                 >
                   {isConnecting ? "..." : tc("connect")}

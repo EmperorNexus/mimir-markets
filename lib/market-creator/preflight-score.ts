@@ -202,6 +202,36 @@ export function scorePreflight(
 }
 
 /**
+ * Deduplicate preflight opinions by slug.
+ *
+ * Ensures that a single persona (identified by `slug`) only contributes once
+ * to the preflight scoring. If multiple opinions share the same slug, only the
+ * last one in the array is retained. This prevents duplicate voting power from
+ * skewing the aggregate score and ensures clear operational boundaries for
+ * market-creator candidates.
+ *
+ * @param opinions - The list of dimension opinions to deduplicate.
+ * @returns A new array of opinions with duplicates removed.
+ */
+export function deduplicateOpinions(
+  opinions: DimensionOpinion[],
+): DimensionOpinion[] {
+  const seen = new Set<string>();
+  const result: DimensionOpinion[] = [];
+
+  // Iterate in reverse to keep the last occurrence of each slug
+  for (let i = opinions.length - 1; i >= 0; i--) {
+    const opinion = opinions[i];
+    if (!seen.has(opinion.slug)) {
+      seen.add(opinion.slug);
+      result.unshift(opinion);
+    }
+  }
+
+  return result;
+}
+
+/**
  * Did the panel report named dimensions at all?
  *
  * Matters during rollout: a fleet of personas that has not been updated returns

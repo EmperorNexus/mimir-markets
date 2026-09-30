@@ -58,6 +58,7 @@ import {
   supportsMessageSigning,
   type ShapedWallet,
 } from "./wallet-connectors";
+import { walletRowLabel } from "./wallet-aria";
 
 /** Remembering the last wallet turns a five-row decision into one tap on return. */
 const RECENT_WALLET_KEY = "mimir-recent-wallet";
@@ -882,6 +883,8 @@ function WalletRow({
   // how "the connect button is broken" reports happen.
   if (installUrl) {
     return (
+      <a href={installUrl} target="_blank" rel="noreferrer" className={shell}
+        aria-label={walletRowLabel(labelFor(wallet), { installed: false, recent: wallet.recent, wrapper: wallet.wrapper })}
       <a
         href={installUrl}
         target="_blank"
@@ -898,6 +901,7 @@ function WalletRow({
       type="button"
       disabled={isPending}
       onClick={wallet.connect}
+      aria-label={walletRowLabel(labelFor(wallet), { installed: wallet.installed, recent: wallet.recent, wrapper: wallet.wrapper })}
       className={shell}
     >
       {body}
@@ -959,6 +963,20 @@ function WalletPickerModal({
         className="w-full max-w-sm border border-pv-border/40 bg-pv-bg p-5 shadow-2xl outline-none"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* sr-only live region announces connection status changes without
+            requiring focus, so Freighter users hear "Connecting to Freighter"
+            as soon as they click a row rather than waiting for the button to
+            re-render under focus. */}
+        <div aria-live="polite" aria-atomic="true" className="sr-only">
+          {isPending
+            ? "Connecting to wallet — please check your wallet extension"
+            : error === "rejected"
+              ? "Connection rejected in wallet"
+              : error
+                ? "Could not connect. Try another wallet."
+                : ""}
+        </div>
+
         <div className="mb-1 flex items-center justify-between">
           <h2 className="font-display text-lg font-bold text-pv-text">
             Connect wallet
@@ -968,7 +986,7 @@ function WalletPickerModal({
             type="button"
             onClick={onClose}
             className="px-2 py-1 text-sm text-pv-muted transition-colors hover:text-pv-text"
-            aria-label="Close"
+            aria-label="Close connect wallet dialog"
           >
             ✕
           </button>
@@ -980,7 +998,7 @@ function WalletPickerModal({
 
         <div className="space-y-2">
           {loading && wallets.length === 0 && (
-            <p className="text-sm text-pv-muted">Looking for wallets…</p>
+            <p className="text-sm text-pv-muted" role="status" aria-live="polite">Looking for wallets…</p>
           )}
 
           {primary && (
@@ -1021,7 +1039,7 @@ function WalletPickerModal({
         </div>
 
         {error && (
-          <p className="mt-3 text-xs text-pv-danger">
+          <p role="alert" className="mt-3 text-xs text-pv-danger">
             {error === "rejected"
               ? "Connection rejected in wallet."
               : "Could not connect. Try another wallet."}

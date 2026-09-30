@@ -12,6 +12,9 @@
  * keep working.
  */
 
+import { TRACE_HEADER } from "../ops/trace-http";
+import { currentTraceId } from "../ops/trace";
+import { isTraceId } from "../ops/trace-id";
 import { createApiError, type ApiErrorShape } from "../server/api-validation";
 
 export type ApiErrorCode =
@@ -37,7 +40,13 @@ export type ApiErrorCode =
   | "budget_exhausted"
   // ── 5xx and upstream ──
   | "upstream_unavailable"
-  | "internal_error";
+  | "internal_error"
+  // ── Evidence Cache Integrity ──
+  | "evidence_cache_integrity_violation"
+  | "evidence_cache_stale"
+  | "evidence_cache_duplicate"
+  | "evidence_cache_cancelled"
+  | "evidence_cache_dependency_failure";
 
 interface ErrorSpec {
   status: number;
@@ -78,6 +87,24 @@ const SPECS: Record<ApiErrorCode, ErrorSpec> = {
 
   upstream_unavailable: { status: 503, retryable: true, retryAfterSeconds: 30 },
   internal_error: { status: 500, retryable: true, retryAfterSeconds: 5 },
+
+  // Evidence Cache Integrity Checks
+  // Integrity violations are critical data consistency errors. Retrying the
+  // exact same payload will not fix the underlying state corruption or mismatch.
+  evidence_cache_integrity_violation: { status: 400, retryable: false },
+  // Stale evidence indicates the cache entry is older than the allowed window.
+  // The agent must fetch fresh data. Retrying with the same stale data is useless.
+  evidence_cache_stale: { status: 400, retryable: false },
+  // Duplicate evidence suggests a replay attack or logic error in the agent.
+  // This is a hard failure for the current operation.
+  evidence_cache_duplicate: { status: 409, retryable: false },
+  // Cancelled evidence means the underlying contract or request was cancelled.
+  // No amount of retrying will revive a cancelled operation.
+  evidence_cache_cancelled: { status: 400, retryable: false },
+  // Dependency failure means a prerequisite check failed (e.g. wallet balance).
+  // This is a transient state that might resolve, but usually requires external
+  // action. We mark it retryable with a backoff to allow for async resolution.
+  evidence_cache_dependency_failure: { status: 400, retryable: true, retryAfterSeconds: 10 },
 };
 
 export interface ApiError extends ApiErrorShape {
@@ -86,6 +113,15 @@ export interface ApiError extends ApiErrorShape {
     retryAfterSeconds?: number;
     /** Field that caused a validation failure, when there is one. */
     field?: string;
+    /**
+     * The trace this failure happened under, when the route ran inside a traced
+     * request.
+     *
+     * An agent reading only its own logs would otherwise have to guess which of
+     * its many in-flight calls produced a `429`. One field, additive, and
+     * meaningless to an agent that ignores it.
+     */
+    trace_id?: string;
   };
 }
 
@@ -105,7 +141,7 @@ export interface ApiErrorResult {
 export function apiError(
   code: ApiErrorCode,
   message: string,
-  opts: { field?: string; retryAfterSeconds?: number } = {},
+  opts: { field?: string; retryAfterSeconds?: number; requestId?: string } = {},
 ): ApiErrorResult {
   const spec = SPECS[code];
   const retryAfter = opts.retryAfterSeconds ?? spec.retryAfterSeconds;
@@ -116,15 +152,37 @@ export function apiError(
       retryable: spec.retryable,
       ...(retryAfter !== undefined ? { retryAfterSeconds: retryAfter } : {}),
       ...(opts.field ? { field: opts.field } : {}),
+      ...(opts.requestId ? { requestId: opts.requestId } : {}),
     },
   };
   const headers: Record<string, string> = {};
-  // Only advertise Retry-After when waiting can actually help; on a 400 it would
-  // be an invitation to retry a request that cannot succeed.
   if (spec.retryable && retryAfter !== undefined && retryAfter > 0) {
     headers["retry-after"] = String(Math.ceil(retryAfter));
   }
+  // Reuse the ambient trace; never mint one here. A trace id invented at the moment
+  // of failure would be echoed back to the caller and match nothing in the logs,
+  // which is worse than no id at all — it looks like correlation and is not. The
+  // route's `tracedRoute` wrapper is what supplies it, and an untraced caller
+  // simply gets a body without the field.
+  const traceId = currentTraceId();
+  if (isTraceId(traceId)) {
+    body.error.trace_id = traceId;
+    headers[TRACE_HEADER] = traceId;
+  }
   return { status: spec.status, body, headers };
+}
+
+export function withRequestId(result: ApiErrorResult, requestId: string): ApiErrorResult {
+  return {
+    ...result,
+    body: {
+      ...result.body,
+      error: {
+        ...result.body.error,
+        requestId,
+      },
+    },
+  };
 }
 
 export function isRetryable(code: ApiErrorCode): boolean {
@@ -133,4 +191,33 @@ export function isRetryable(code: ApiErrorCode): boolean {
 
 export function statusFor(code: ApiErrorCode): number {
   return SPECS[code].status;
+}
+
+export interface ApiErrorSpec {
+  code: ApiErrorCode;
+  status: number;
+  retryable: boolean;
+  retryAfterSeconds?: number;
+}
+
+/**
+ * The whole catalogue, in declaration order.
+ *
+ * Published for documentation consumers: the agent API wire contract
+ * (`lib/ops/agent-api-openapi.ts`) derives its error examples from these rows, so
+ * a status, a retry hint or a `retryable` flag cannot be published as something
+ * the server does not actually send. `SPECS` is a `Record<ApiErrorCode, …>`, so
+ * adding a code without a spec is a type error, and this list can only be wrong by
+ * omission — which the contract's own audit turns into a failed check.
+ */
+export function apiErrorCatalogue(): ApiErrorSpec[] {
+  return (Object.keys(SPECS) as ApiErrorCode[]).map((code) => {
+    const spec = SPECS[code];
+    return {
+      code,
+      status: spec.status,
+      retryable: spec.retryable,
+      ...(spec.retryAfterSeconds !== undefined ? { retryAfterSeconds: spec.retryAfterSeconds } : {}),
+    };
+  });
 }

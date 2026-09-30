@@ -307,14 +307,10 @@ export async function verifyStellarPayment(
     };
   }
   if (!isAccountAddress(requirements.payTo)) {
-    // A `C…` contract can hold the same USDC balance, but a classic Payment
-    // operation cannot target one — so a contract payTo is a seller
-    // misconfiguration rather than a buyer error, and is refused up front rather
-    // than after the buyer has already spent money it cannot prove.
     return {
       ok: false,
       reason: "unsupported_pay_to",
-      message: `payTo ${requirements.payTo} is not a Stellar account — classic payments cannot target a contract`,
+      message: `payTo ${requirements.payTo} is not a valid Stellar account address`,
     };
   }
 

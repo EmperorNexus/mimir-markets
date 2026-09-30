@@ -165,6 +165,7 @@ export const FEATURES = [
   "virtual_baskets",
   "agent_baskets",
   "fee_policy",
+  "x402_quote_expiry",
   // Durable nonce persistence with per-row TTL expiry. ON by default — this is a
   // security property (replay protection), not a product feature. The flag exists
   // so an operator can see it in the feature list and confirm it is always on.
@@ -203,6 +204,9 @@ const FEATURE_DEFAULTS: Record<Feature, boolean> = {
   // independent audit yet (see docs/LAUNCH_GATE_STATUS.md). Turning this on before
   // that gate closes would charge fees against an escrow nobody has reviewed.
   fee_policy: false,
+  // x402_quote_expiry: Enforces strict expiration on payment quotes to preserve
+  // contract-first accounting and prevent stale quote exploitation.
+  x402_quote_expiry: true,
   // Nonce persistence is a security invariant, not a product rollout. Default ON
   // so no deploy step is needed; only disable in isolated local dev.
   nonce_persistence: true,

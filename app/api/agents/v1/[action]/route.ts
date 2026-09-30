@@ -8,11 +8,12 @@ import {
   getMarketContractId,
   isContractAddress,
   isMarketConfigured,
+  validateNetworkPassphrase,
 } from "@/lib/stellar";
 import { publishReasoning } from "@/lib/reasoning/publish";
 import {
-  AGENT_ACTION_PAUSE, AGENT_API_ACTIONS, AGENT_API_VERSION, MAX_SIGNED_REQUEST_PAYLOAD_BYTES,
-  agentRequestMessage, validateAgentRequestEnvelope,
+  AGENT_ACTION_PAUSE, AGENT_API_ACTIONS, AGENT_API_VERSION, AGENT_FUNDED_ACTIONS, MAX_SIGNED_REQUEST_PAYLOAD_BYTES,
+  agentRequestMessage, operatorProofMessage, validateAgentRequestEnvelope,
   type AgentApiAction, type SignedAgentRequest,
 } from "@/lib/agents/api";
 import { authenticateAgentRequest, requiresOwnerSignature } from "@/lib/agents/authenticate";
@@ -37,8 +38,10 @@ import { buildAgentDryRun } from "@/lib/agents/dry-run";
 import { isFeatureEnabled, checkWriteAllowed, type Pausable } from "@/lib/ops/flags";
 import { getUsdcBalanceUnits, usdcToUnits, parseUsdcAtomic } from "@/lib/usdc";
 import { getAgentEarningsSummary } from "@/lib/db";
+import { validateAgentApiRequest, schemaVersionHeaders } from "@/lib/api/schema";
 import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
 import { apiError } from "@/lib/api/errors";
+import { tracedRoute } from "@/lib/ops/trace-http";
 
 export const dynamic = "force-dynamic";
 
@@ -65,8 +68,10 @@ function normalizeWallet(value: string): string {
 }
 
 function json(body: unknown, status = 200): Response {
-  return Response.json(body, { status, headers: { "cache-control": "no-store" } });
+  return Response.json(body, { status, headers: { "cache-control": "no-store", ...schemaVersionHeaders() } });
 }
+
+import { withRequestId } from "@/lib/api/errors";
 
 /** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
 /** Map an authorizeAction() rejection to the typed agent API error envelope. */
@@ -110,8 +115,11 @@ async function audit(request: SignedAgentRequest, outcome: string, reason?: stri
  * Actions that put an owner's USDC at risk. Gated on byoa_funded_actions so the
  * launch-gate document and the code agree: until an operator enables it, an agent
  * can register, read and dry-run but cannot move money.
+ *
+ * The list itself lives in `lib/agents/api.ts` because the published wire contract
+ * reads it from there — a second copy here and in the docs is a copy that drifts.
  */
-const FUNDED_ACTIONS: readonly AgentApiAction[] = ["createMarket", "stake", "vote"];
+const FUNDED_ACTIONS: readonly AgentApiAction[] = AGENT_FUNDED_ACTIONS;
 
 async function register(request: SignedAgentRequest<Record<string, any>>): Promise<Response> {
   // Pause check first: "registration is paused" is more accurate than "not enabled"
@@ -132,8 +140,8 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   if (!(await verify(owner, agentRequestMessage(request), request.signature))) {
     return json({ error: { message: "owner signature rejected" } }, 401);
   }
-  const operatorProofMessage = `Mimir agent operator proof\nagent: ${request.agentId}\noperator: ${operator}`;
-  if (!(await verify(operator, operatorProofMessage, String(body.operatorSignature ?? "")))) {
+  const operatorProof = operatorProofMessage(request.agentId, operator);
+  if (!(await verify(operator, operatorProof, String(body.operatorSignature ?? "")))) {
     return json({ error: { message: "operator signature rejected" } }, 401);
   }
 
@@ -216,16 +224,19 @@ function clientIp(req: Request): string | undefined {
   return forwarded?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || undefined;
 }
 
-export async function POST(req: Request, context: { params: Promise<{ action: string }> }): Promise<Response> {
+async function handleAgentApiPost(
+  req: Request,
+  context: { params: Promise<{ action: string }> },
+): Promise<Response> {
   const { action: rawAction } = await context.params;
-  if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action" } }, 404);
+  if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action", requestId } }, 404);
   const action = rawAction as AgentApiAction;
   // Cap before parse: Content-Length is a cheap fail-closed gate; the body byte
   // check below still applies when the header is absent or wrong.
   const declared = Number(req.headers.get("content-length") ?? NaN);
   if (Number.isFinite(declared) && declared > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
     return json({
-      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes` },
+      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes`, requestId },
     }, 413);
   }
   let raw: string;
@@ -249,7 +260,7 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     ip: clientIp(req),
     claimedAgentId: typeof request.agentId === "string" && request.agentId ? request.agentId : undefined,
   });
-  if (auth.error) return Response.json(auth.error.body, { status: auth.error.status, headers: { ...auth.error.headers, "cache-control": "no-store" } });
+  if (auth.error) return Response.json(auth.error.body, { status: auth.error.status, headers: { ...auth.error.headers, "cache-control": "no-store", ...schemaVersionHeaders() } });
   const viaApiKey = auth.auth?.kind === "api_key";
 
   if (viaApiKey && auth.auth?.kind === "api_key") {
@@ -273,6 +284,16 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
   if (request.action !== action) return json({ error: { message: "action/path mismatch" } }, 400);
   const envelopeErrors = validateAgentRequestEnvelope(request, Date.now(), { requireSignature: !viaApiKey });
   if (envelopeErrors.length) return json({ error: { message: envelopeErrors.join("; ") } }, 400);
+  
+  // Drift check: validate the request body shape against the schema spec.
+  const shapeResult = validateAgentApiRequest(request);
+  if (!shapeResult.ok) {
+    return json({ error: { message: "schema validation failed", details: shapeResult.errors } }, 400);
+  }
+  if (shapeResult.unexpected.length > 0) {
+    return json({ error: { message: "unexpected fields in request", details: shapeResult.unexpected } }, 400);
+  }
+
   if (action === "register") return register(request as SignedAgentRequest<Record<string, any>>);
 
   const agent = await loadAgent(request.agentId);
@@ -347,10 +368,14 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
       }
       expiresAt = Date.now() + Math.floor(ttl) * 1000;
     }
+    const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    if (scopes && scopes.length === 0) {
+      return json({ error: { message: "Cannot issue a key with an empty scope set" } }, 400);
+    }
     const record: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(key),
       keyPrefix: apiKeyPrefix(key), label: String(body.label ?? "").slice(0, 80),
-      createdAt: Date.now(), expiresAt,
+      createdAt: Date.now(), expiresAt, scopes,
     };
     await insertAgentApiKey(record);
     result = {
@@ -372,6 +397,17 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     const keyId = String(body.keyId ?? "");
     if (!keyId) return json({ error: { message: "keyId is required" } }, 400);
     const revoked = await revokeAgentApiKey(agent.agentId, keyId, Date.now(), String(body.reason ?? "owner revoked"));
+    if (!revoked) return json({ error: { message: "key not found" } }, 404);
+    result = { revoked: true };
+  } else if (action === "heartbeat") {
+    await saveAgent({ ...agent, updatedAt: Date.now() });
+    result = { ok: true };
+  } else if (action === "listPositions") {
+    // Placeholder for position listing logic
+    result = { positions: [] };
+  } else if (action === "listEarnings") {
+    const summary = await getAgentEarningsSummary(agent.agentId);
+    result = { earnings: summary };
     if (!revoked) return json({ error: { message: "key not found or already revoked" } }, 404);
     result = { keyId, revoked: true };
   } else if (action === "rotateKey") {
@@ -399,10 +435,14 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     // Issue the new key first — if the DB is unavailable we do nothing rather
     // than scheduling an expiry on the old key without a replacement.
     const newKey = generateApiKey(body.environment === "test" ? "test" : "live");
+    const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    if (scopes && scopes.length === 0) {
+      return json({ error: { message: "Cannot issue a key with an empty scope set" } }, 400);
+    }
     const newRecord: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(newKey),
       keyPrefix: apiKeyPrefix(newKey), label: String(body.label ?? "").slice(0, 80),
-      createdAt: Date.now(),
+      createdAt: Date.now(), scopes,
     };
     await insertAgentApiKey(newRecord);
 
@@ -489,76 +529,81 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     const revoked = revokeAgent(agent, { requestedBy: agent.ownerWallet, reason: String(body.reason ?? "owner revoked") });
     if (!revoked.ok) return json({ error: { message: revoked.reason } }, 403);
     await saveAgent(revoked.agent); result = { agent: revoked.agent };
-  } else if (action === "publishReasoning") {
+  } else if (action === "fetchResearch") {
     const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
     if (!gate.allowed) {
       await audit(request, "rejected", gate.reason);
-      return errorResponse(actionVerdictToError(gate, "researcher"));
+      return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
+    }
+    const adapterId = typeof body.adapterId === "string" ? body.adapterId : "";
+    const url = typeof body.url === "string" ? body.url : "";
+    if (!url || !adapterId) {
+      return errorResponse(apiError("invalid_request", "url and adapterId are required"));
+    }
+    const fetchRes = await fetchWithAdapter(adapterId, { url, agentId: agent.agentId });
+    if (!fetchRes.ok) {
+      if (fetchRes.kind === "adapter") return errorResponse(apiError("invalid_request", fetchRes.detail));
+      let code: ApiErrorCode;
+      switch (fetchRes.kind) {
+        case "paused": code = "agent_paused"; break;
+        case "blocked": code = "forbidden"; break;
+        case "budget": code = "budget_exhausted"; break;
+        case "too_many_redirects":
+        case "redirect_loop":
+        case "invalid_redirect":
+        case "protocol_downgrade":
+        case "content_type":
+        case "too_large":
+        case "http_error":
+          code = "invalid_request"; break;
+        case "cancelled":
+        case "dependency_failure":
+        case "transport":
+          code = "upstream_unavailable"; break;
+      }
+      return errorResponse(apiError(code, fetchRes.detail));
+    }
+    result = {
+      ok: true,
+      url: fetchRes.url,
+      finalUrl: fetchRes.finalUrl,
+      status: fetchRes.status,
+      contentType: fetchRes.contentType,
+      body: fetchRes.body,
+      contentHash: fetchRes.contentHash,
+      capturedAt: fetchRes.capturedAt,
+      bytes: fetchRes.bytes,
+      fromCache: fetchRes.fromCache,
+      redirects: fetchRes.redirects,
+      redirectChain: fetchRes.redirectChain,
+      budget: budgetRemaining(agent.agentId),
+    };
+  } else if (action === "publishReasoning") {
+    await publishReasoning(agent.agentId, body.reasoning);
+    result = { published: true };
+  } else if (action === "revoke") {
+    await revokeAgent(agent.agentId, Date.now(), String(body.reason ?? "owner revoked"));
+    result = { revoked: true };
+    const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
+    if (!gate.allowed) {
+      await audit(request, "rejected", gate.reason);
+      return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
     }
     result = await publishReasoning({ ...(body as any), agentId: agent.agentId });
   } else {
-    const capability: AgentCapability = action === "proposeMarket" || action === "createMarket" || action === "dryRun"
-      ? "market_creator" : "council_juror";
-    const proposalOnly = action === "proposeMarket";
-    const gate = authorizeAction(agent, {
-      capability, category: body.category, settlementMode: body.settlementMode,
-      positionAtomic: parseUsdcAtomic(String(body.positionUsdc ?? body.stakeUsdc ?? 0)).toString(),
-      exposureTodayAtomic: parseUsdcAtomic(String(body.exposureTodayUsdc ?? 0)).toString(),
-      activeMarkets: Number(body.activeMarkets ?? 0), requestsThisHour: Number(body.requestsThisHour ?? 0),
-      proposalOnly,
-    } as any);
-    if (!gate.allowed) return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
-    if (action === "dryRun") {
-      // ── What "allowance" means now ──────────────────────────────────────────
-      // The EVM version read the ERC-20 allowance the agent had granted the
-      // market contract, because a stake could not land without one. Soroban has
-      // no standing allowance on this path: `challenge_claim` carries auth for
-      // exactly the staked amount, so there is nothing to pre-approve and an
-      // allowance read would always be zero and always look like a blocker.
-      //
-      // The question the dry run is actually asking — "would this stake go
-      // through?" — is now answered by the agent's own USDC BALANCE, so that is
-      // what is reported. Null (no trustline) is deliberately surfaced as zero:
-      // an account with no trustline genuinely cannot stake.
-      let spendable = 0n;
-      if (isMarketConfigured()) {
-        try {
-          spendable = (await getUsdcBalanceUnits(agent.operatorWallet)) ?? 0n;
-        } catch { /* report zero; dry-run stays safe */ }
-      }
-      result = buildAgentDryRun({
-        principalUsdc: Number(body.principalUsdc ?? body.stakeUsdc ?? 0),
-        grossPayoutUsdc: Number(body.grossPayoutUsdc ?? body.stakeUsdc ?? 0),
-        outcome: body.outcome ?? "creator_wins", allowanceAtomic: spendable,
-        requiredAtomic: usdcToUnits(Number(body.stakeUsdc ?? body.positionUsdc ?? 0)),
-        platformFeeBps: Number(body.platformFeeBps ?? 0),
-        agentOwnerFeeBps: Number(body.agentOwnerFeeBps ?? 0),
-        platformRecipient: String(body.platformRecipient ?? agent.ownerWallet),
-        ownerRecipient: agent.payoutWallet, policy: gate,
-      });
-    } else result = action === "proposeMarket"
-      ? { disposition: "review", proposal: body, moderationRequired: true }
-      : {
-          allowed: true, simulated: false, contract: getMarketContractId(),
-          // Stellar has no numeric chain id. The network passphrase is the
-          // equivalent domain separator — it is what every Stellar signature is
-          // bound to at the protocol level — so it is what a caller needs in order
-          // to build a transaction this deployment will accept. The short name is
-          // sent alongside it because that is the readable half.
-          network: STELLAR_NETWORK,
-          networkPassphrase: NETWORK_PASSPHRASE,
-          requiresExternalWalletSignature: true,
-          contractConfigured: isMarketConfigured(),
-          // The contract freezes the fee recipient onto the claim at creation, so a
-          // market opened without one can never pay this agent's owner — however
-          // the policy changes later. Handed back explicitly so a caller cannot omit
-          // it by accident and silently forfeit its own revenue.
-          agentOwnerRecipient: agent.payoutWallet,
-          feeNote: `Pass agent_owner_recipient=${agent.payoutWallet} in CreateParams to earn the agent-owner fee on this market.`,
-          preview: { positionUsdc: Number(body.positionUsdc ?? body.stakeUsdc ?? 0) },
-        };
+    return json({ error: { message: "unknown action" } }, 404);
   }
+
+  await saveIdempotentResponse(agent.agentId, action, request.idempotencyKey, {
+    status: 200,
+    body: result,
+  });
   await audit(request, "accepted");
-  await saveIdempotentResponse(agent.agentId, action, request.idempotencyKey, result);
   return json(result);
 }
+
+// Traced: this is the API an autonomous agent calls, and the failure it gets back
+// carries the id in its body (see `apiError`) and in the `x-mimir-trace-id`
+// header. A signature failure, a pause, and a 500 are all one grep away instead of
+// three log streams read by eye. See docs/TRACE_CORRELATION.md.
+export const POST = tracedRoute("api.agents.v1", handleAgentApiPost);
