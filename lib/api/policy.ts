@@ -1,7 +1,7 @@
 /**
- * Access tiers for API routes (§11).
+ * Access tiers for API routes (#11).
  *
- * Four kinds of caller reach these routes and they need different things checked.
+ * Five kinds of caller reach these routes and they need different things checked.
  * Before this, each route decided for itself — which is how one of them ends up
  * reading a secret from the wrong header, or forgetting a rate limit, and nobody
  * notices because there is no single place to look.
@@ -9,7 +9,9 @@
  *   public_read        anyone, including an OG scraper with no session
  *   authenticated_user a wallet acting for itself
  *   registered_agent   an agent acting under a signed, replay-protected envelope
+ *   api_key_agent     an agent presenting a bearer API key
  *   internal_worker    a cron or worker holding the shared secret
+ *   admin_operator      an operator presenting the admin secret, distinct from user sessions
  *
  * The rules that make this worth having:
  *
@@ -23,7 +25,8 @@
  *    it is free to avoid.
  *  - **A missing configured secret refuses everything.** An unset CRON_SECRET must
  *    not mean "no auth required" — that turns a deploy mistake into an open
- *    endpoint.
+ *    endpoint. The same applies to ADMIN_SECRET: admin auth is not a user session
+ *    and must not fall back to one.
  */
 
 import { apiError, type ApiErrorCode, type ApiErrorResult } from "./errors";
@@ -35,6 +38,7 @@ export const ACCESS_TIERS = [
   "registered_agent",
   "api_key_agent",
   "internal_worker",
+  "admin_operator",
 ] as const;
 export type AccessTier = (typeof ACCESS_TIERS)[number];
 
@@ -50,6 +54,10 @@ export interface TierPolicy {
   requiresSignature: boolean;
   /** The shared worker secret must match. */
   requiresWorkerSecret: boolean;
+  /** The admin secret must match. Distinct from the worker secret. */
+  requiresAdminSecret: boolean;
+  /** Requires browser-origin validation for mutating requests (CSRF protection). */
+  requiresOriginValidation: boolean;
   /** Rate-limit dimensions that apply. */
   limitDimensions: LimitRule["dimension"][];
 }
@@ -60,6 +68,8 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: false,
     requiresSignature: false,
     requiresWorkerSecret: false,
+    requiresAdminSecret: false,
+    requiresOriginValidation: false,
     // IP and route only: an anonymous caller has no wallet to bucket by.
     limitDimensions: ["ip", "route"],
   },
@@ -68,6 +78,8 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: true,
     requiresSignature: false,
     requiresWorkerSecret: false,
+    requiresAdminSecret: false,
+    requiresOriginValidation: true,
     limitDimensions: ["ip", "wallet", "route"],
   },
   registered_agent: {
@@ -75,6 +87,8 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: true,
     requiresSignature: true,
     requiresWorkerSecret: false,
+    requiresAdminSecret: false,
+    requiresOriginValidation: false,
     limitDimensions: ["agent", "route"],
   },
   /**
@@ -92,6 +106,8 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: false,
     requiresSignature: false,
     requiresWorkerSecret: false,
+    requiresAdminSecret: false,
+    requiresOriginValidation: false,
     limitDimensions: ["agent", "ip", "route"],
   },
   internal_worker: {
@@ -99,9 +115,32 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: false,
     requiresSignature: false,
     requiresWorkerSecret: true,
+    requiresAdminSecret: false,
+    requiresOriginValidation: false,
     // Route only: a worker's own bursts are a scheduling problem, not abuse, and
     // bucketing by IP would rate-limit an entire serverless region together.
     limitDimensions: ["route"],
+  },
+  /**
+   * An operator tool caller presenting the admin secret.
+   *
+   * Admin authentication is deliberately not a user session and not the worker
+   * secret: an admin operator is not a wallet acting for itself, and a cron job
+   * is not an operator. Mixing them means a compromised worker credential
+   * could drive operational actions, or a logged-in user could reach them.
+   *
+   * Bucketed by IP and route: the admin secret is shared, so there is no stable
+   * per-operator identity to bucket by, and an exhausted operator should not be
+   * able to look up the secret by brute forcing.
+   */
+  admin_operator: {
+    tier: "admin_operator",
+    requiresWallet: false,
+    requiresSignature: false,
+    requiresWorkerSecret: false,
+    requiresAdminSecret: true,
+    requiresOriginValidation: false,
+    limitDimensions: ["ip", "route"],
   },
 };
 
@@ -114,11 +153,17 @@ export interface RequestContext {
   signatureVerified?: boolean;
   /** Secret presented by the caller, e.g. from an Authorization header. */
   presentedSecret?: string;
-  /** Secret the server expects. Undefined means none is configured. */
+  /** Secret the server expects for the worker tier. Undefined means none is configured. */
   expectedSecret?: string;
+  /** Admin secret presented by the caller. Distinct from the worker secret. */
+  presentedAdminSecret?: string;
+  /** Admin secret the server expects. Undefined means none is configured. */
+  expectedAdminSecret?: string;
   /** True when this call moves money or changes authority. */
   mutatesValue?: boolean;
   idempotencyKey?: string;
+  /** True if the origin was verified against the host. */
+  originValid?: boolean;
 }
 
 export interface AuthorizeResult {
@@ -168,6 +213,17 @@ export function authorizeRequest(
     }
   }
 
+  if (policy.requiresAdminSecret) {
+    const expected = ctx.expectedAdminSecret?.trim();
+    // Admin auth fails closed too. An unset ADMIN_SECRET must not fall back to
+    // a user session or the worker secret — those are different trust boundaries.
+    if (!expected) return refuse("forbidden", "admin secret is not configured");
+    const presented = ctx.presentedAdminSecret?.trim() ?? "";
+    if (!presented || !secretsMatch(presented, expected)) {
+      return refuse("unauthenticated", "invalid admin credentials");
+    }
+  }
+
   if (policy.requiresWallet && !ctx.wallet) {
     return refuse("unauthenticated", "a wallet is required for this route");
   }
@@ -184,6 +240,13 @@ export function authorizeRequest(
   // A retried money-moving call without an idempotency key is a second payment.
   if (ctx.mutatesValue && tier !== "public_read" && !ctx.idempotencyKey?.trim()) {
     return refuse("invalid_request", "an idempotency key is required for this operation");
+  }
+
+  // Enforce browser-origin policy (CSRF) for mutating requests.
+  if (ctx.mutatesValue && policy.requiresOriginValidation) {
+    if (ctx.originValid !== true) {
+      return refuse("forbidden", "cross-origin mutations are not allowed");
+    }
   }
 
   const keys: RateLimitKeys = {

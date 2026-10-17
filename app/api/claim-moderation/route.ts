@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 
-import { createApiError } from "@/lib/server/api-validation";
 import {
   moderateClaim,
   type ClaimModerationInput,
 } from "@/lib/server/claim-moderation";
 import { handleClaimModerationPost } from "@/lib/server/claim-moderation-route-handler";
+import { requireAdminSession } from "@/lib/server/admin-auth";
 import {
   getGlobalCooldownMs,
   hashModerationInput,
@@ -58,6 +58,14 @@ function parseInput(value: unknown): ClaimModerationInput | null {
 }
 
 export async function POST(request: Request) {
+  const adminAuth = await requireAdminSession(request);
+  if (!adminAuth.ok) {
+    return NextResponse.json(
+      { error: adminAuth.error },
+      { status: adminAuth.status },
+    );
+  }
+
   return handleClaimModerationPost({ request, moderateClaim });
 }
 
