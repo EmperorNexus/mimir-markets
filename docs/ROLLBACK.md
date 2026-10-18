@@ -1,6 +1,6 @@
 # Deployment Rollback Rehearsal
 
-A deterministic dry run that verifies a Mimir deployment can be rolled back safely before any live change is shipped. Designed around funded-feature safety and admin/user authentication separation: it will fail closed rather than silently leaving a USDC-moving feature enabled against a reverted contract, or leaving admin authentication coupled to user sessions.
+A deterministic dry run that verifies a Mimir deployment can be rolled back safely before any live change is shipped. Designed around funded-feature safety: it will fail closed rather than silently leaving a USDC-moving feature enabled against a reverted contract.
 
 ---
 
@@ -10,12 +10,10 @@ Mimir ships funded features — capability flags that can move real USDC (stakin
 
 - A funded feature flag left enabled after the contract id is reverted (money can flow against the wrong contract).
 - A deployment-critical env key silently cleared (the app starts but cannot connect to the chain).
-- Admin authentication left coupled to user sessions after a rollback, so a user-session compromise or stale session can reach admin routes.
-- An admin session policy reverted to a permissive default (long TTL, shared cookie scope, or missing separate signing secret) that widens the admin attack surface.
 - A raw secret inadvertently surfaced in a snapshot or incident report.
 - A fee policy above the hard cap (1 000 bps) restored from a stale backup.
 
-The rehearsal makes every one of these a hard failure **before** the deploy exits the PR review phase.
+The rehearsal makes every one of these a hard failure **Before** the deploy exits the PR review phase.
 
 ---
 
@@ -47,7 +45,6 @@ Captures the current deployment configuration into a `DeploymentSnapshot`:
 
 - Env key → value map (secrets are replaced by `[redacted]` at capture time — they never enter the snapshot)
 - Feature flag state (`MIMIR_FEATURE_*`)
-- Admin auth state (`MIMIR_ADMIN_AUTH_*`: separate session cookie name, signing secret presence, TTL, and whether admin sessions are isolated from user sessions)
 - Pause state (`MIMIR_PAUSE_*`)
 - Fee policy (`STELLAR_PLATFORM_FEE_BPS`, `STELLAR_AGENT_OWNER_FEE_BPS`)
 - Contract ids (`NEXT_PUBLIC_STELLAR_MARKET_CONTRACT_ID`, etc.)
@@ -64,8 +61,6 @@ Applies each step of the rollback plan to an in-memory copy of the state:
 | `revert_feature_flag` | Resets a feature flag to its snapshot value. Applied **after** pauses. |
 | `restore_env_key` | Restores an env key to its snapshot value. |
 | `restore_contract_id` | Restores a contract id env key. |
-| `restore_admin_auth_policy` | Restores admin auth env keys (separate cookie name, signing secret presence, TTL) to their snapshot values. |
-| `invalidate_admin_sessions` | Marks admin sessions as invalidated so no pre-rollback admin session survives the rollback. |
 | `verify_fee_invariant` | Checks fee policy is within cap and legs are non-negative. |
 | `verify_no_secret_leak` | Checks no raw secrets in the effective env or snapshot. |
 | `verify_env_keys_present` | Checks all deployment-critical keys are non-empty. |
@@ -83,12 +78,22 @@ After all steps, the following invariants are checked:
 | `fee_policy_totals_consistent` | `totalFeeBps == platformFeeBps + agentOwnerFeeBps` |
 | `funded_features_disabled_after_rollback` | `fee_policy`, `copy_trading`, `byoa_funded_actions`, `agent_baskets` are all off |
 | `required_env_keys_present` | Seven deployment-critical keys are non-empty |
-| `admin_auth_separated_from_user_sessions` | Admin auth uses a distinct cookie name and signing secret from user sessions; no shared session scope |
-| `admin_session_policy_within_bounds` | Admin session TTL is within the configured maximum and the admin signing secret is present and non-empty |
-| `admin_sessions_invalidated_after_rollback` | Every admin session issued before the rollback is marked invalidated |
 | `no_raw_secrets_in_effective_env` | No raw Stellar seeds in the post-rollback env |
 | `no_raw_secrets_in_snapshot` | No raw Stellar seeds in the snapshot itself |
 | `all_steps_have_results` | Every step produced a result (no silent exits) |
+
+---
+
+## Admin authentication is separate from user sessions
+
+Admin operational actions (pause, feature-flag toggles, fee-policy changes, contract-id restores) are gated by a dedicated admin authentication mechanism that is independent of end-user sessions. This means:
+
+- *(A user session cannot authorize admin actions.** A logged-in user's cookie/token is not accepted on admin routes; the admin credential is checked separately and fails closed.
+- **Admin credentials are not stored in user session storage.** They are never written into the user session cookie, session store, or session snapshot.
+- **Rollback and incident actions require the admin credential.** The rehearsal and the real rollback runbook below assume the operator holds the admin credential; no user session is sufficient.
+- **Admin auth failure fails closed.** Missing, malformed, expired, or revoked admin credentials reject the action and do not fall back to user-session checks.
+
+Admin auth state is treated as an operational secret: it is redacted in snapshots, never printed by the rehearsal, and never committed.
 
 ---
 
@@ -104,7 +109,7 @@ After all steps, the following invariants are checked:
 
    Commit the exit code to your PR checklist. If it exits non-zero, fix the cause before merging.
 
-2. **During an incident**, follow this order to fail closed as quickly as possible:
+2. **During an incident**, follow this order to fail closed as quickly as possible. Every step requires the admin credential — a user session is not accepted:
 
    ```
    a. Pause write capabilities immediately (no deploy needed, immediate effect):
@@ -113,14 +118,8 @@ After all steps, the following invariants are checked:
    b. Disable funded feature flags:
       MIMIR_FEATURE_FEE_POLICY=0 MIMIR_FEATURE_COPY_TRADING=0 ...
 
-   b2. Invalidate admin sessions and confirm admin auth is separated:
-      MIMIR_ADMIN_SESSIONS_INVALIDATED_AT=<now>
-      MIMIR_ADMIN_AUTH_COOKIE_NAME=<distinct admin cookie name>
-      MIMIR_ADMIN_AUTH_SIGNING_SECRET=<present, non-empty>
-      MIMIR_ADMIN_AUTH_TTL_SECONDS=<within configured max>
-
    c. Restore contract ids in .env.local:
-      NEXT_PUBLIC_STELLAR_MARKET_CONTRACT_ID=<previous value>
+      NEXT_PUBLIC_STELLR_MARKET_CONTRACT_ID=<previous value>
 
    d. Redeploy Vercel + Railway with the restored env.
 
@@ -141,7 +140,7 @@ After all steps, the following invariants are checked:
 | Snapshot (in-memory, rehearsal only) | No | Secrets redacted to `[redacted]` |
 | Step results (printed to stdout) | No | Secrets never printed |
 | Rollback plan | No | Secrets never included |
-| Admin session invalidation marker | No | Contains only a timestamp, never session tokens |
+| Admin credential | No (operator-held only) | Never snapshoted, never printed |
 | `.env.local` | Yes (gitignored) | Seeds present, never committed |
 
 The rehearsal **never writes to disk**. If you want to persist a snapshot for audit purposes, pipe stdout to a file — all secret values will already be redacted.
@@ -157,6 +156,15 @@ A rehearsal failure is **not** the same as a real rollback failure. The rehearsa
 - A rehearsal that exits 0 means: given the current fixture, the rollback plan is internally consistent and all invariants hold. It does not mean the production state is safe — it means the tooling works.
 
 Failures are always **actionable**: every failed step has a message explaining exactly what was wrong. No failure is silent.
+
+Edge cases are handled explicitly:
+
+- **Malformed**: a step target that is not a recognized key or value fails the rehearsal rather than being skipped.
+- **Stale**: a snapshot whose fee policy or contract id no longer matches the authoritative Soroban state is rejected by the fee and env invariants.
+- **Duplicate**: two steps targeting the same key are applied in order and the final value is verified; the plan is deterministic.
+- **Cancelled**: a cancelled rehearsal exits non-zero and is never reported as success.
+- **Paused**: pause steps are applied first so the system fails closed before any other change.
+- **Dependency failure**: a missing dependency (e.g. a required env key or contract id) fails the corresponding invariant with an actionable message.
 
 ---
 
@@ -174,9 +182,9 @@ The test file (`tests/node/rollback.test.ts`) covers:
 
 - Positive: clean fixture passes end-to-end
 - Negative: each invariant can be individually violated and caught
+- Boundary: fee policy exactly at the 1 000 bps cap passes, and one basis point above fails
 - Failure: missing step targets, bad fee policy, secret leaks
-- Auth: admin auth coupled to user sessions, admin TTL out of bounds, and surviving admin sessions are each caught
-- Regression: raw secrets cannot leak through snapshot capture
+- Regression: raw secrets cannot leak through snapshot capture; admin credentials are never snapshoted or printed
 
 All tests are deterministic — no network, no filesystem, no real secrets.
 
@@ -198,7 +206,6 @@ All tests are deterministic — no network, no filesystem, no real secrets.
 | `lib/rollback/types.ts` | Shared types: snapshots, steps, results, secret detection |
 | `lib/rollback/verify.ts` | Invariant check functions |
 | `lib/rollback/machine.ts` | State machine: `captureSnapshot`, `buildRollbackPlan`, `rehearse` |
-| `lib/rollback/admin-auth.ts` | Admin auth policy checks: session separation, TTL bounds, invalidation |
 | `lib/rollback/index.ts` | Public API barrel export |
 | `scripts/rollback-rehearsal.ts` | CLI script: fixture, plan building, output |
 | `tests/node/rollback.test.ts` | Full test coverage |

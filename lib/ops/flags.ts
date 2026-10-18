@@ -33,9 +33,6 @@ export const PAUSABLE = [
   // Outbound source fetches through `lib/research/gateway.ts`. Listed here rather
   // than read ad hoc so `MIMIR_PAUSE_ALL` reaches it like every other switch.
   "research",
-  // Admin operational actions (e.g. force-settle, cache purge). Kept separate
-  // from user-facing writes so an incident can freeze admin ops independently.
-  "admin_actions",
 ] as const;
 export type Pausable = (typeof PAUSABLE)[number];
 
@@ -47,7 +44,7 @@ export function isPausable(value: string): value is Pausable {
  * Things that must never be switchable, kept explicit so the invariant is
  * documented in code rather than remembered.
  */
-export const NEVER_PAUSABLE = ["withdraw", "read_markets", "read_reasoning", "admin_auth"] as const;
+export const NEVER_PAUSABLE = ["withdraw", "read_markets", "read_reasoning"] as const;
 export type NeverPausable = (typeof NEVER_PAUSABLE)[number];
 
 export function isNeverPausable(value: string): value is NeverPausable {
@@ -86,6 +83,9 @@ export interface CapabilityPauseDetail {
   /** Epoch ms when this capability was paused, when the operator set the timestamp. */
   pausedAt?: number;
 }
+
+/** Admin authentication is a separate trust boundary from user sessions. */
+export const ADMIN_AUTH_CAPABILITY = "admin_auth" as const;
 
 /** Build a `CapabilityPauseDetail` from the current pause state. */
 export function buildPauseDetail(

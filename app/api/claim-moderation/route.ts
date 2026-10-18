@@ -58,11 +58,11 @@ function parseInput(value: unknown): ClaimModerationInput | null {
 }
 
 export async function POST(request: Request) {
-  const adminAuth = await requireAdminSession(request);
-  if (!adminAuth.ok) {
+  const admin = await requireAdminSession(request);
+  if (!admin.ok) {
     return NextResponse.json(
-      { error: adminAuth.error },
-      { status: adminAuth.status },
+      { error: admin.error },
+      { status: admin.status },
     );
   }
 

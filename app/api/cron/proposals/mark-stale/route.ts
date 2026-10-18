@@ -1,27 +1,23 @@
 /**
  * Cron: mark queued/in-review market proposals past their deadline as stale.
  *
- * Authorization: same `CRON_SECRET` bearer pattern as the other cron routes. The
- * tier fails closed when `CRON_SECRET` is unset, so a deploy that forgets
- * the secret returns 403 rather than leaving the sweep publicly callable.
- *
- * Admin authentication is deliberately separate from user sessions: this
- * route never consults cookie-based user sessions and only accepts the
- * internal-worker bearer secret. This keeps operational actions from being
- * reachable through funded user flows and preserves Soroban-state authority.
+ * Authorization: admin/ops authentication is separated from user sessions. This
+ * route uses the `internal_worker` policy tier with a dedicated `CRON_SECRET`
+ * bearer token, never a user session cookie. The tier fails closed when
+ * `CRON_SECRET` is unset, so a deploy that forgets the secret returns 403
+ * rather than leaving the sweep publicly callable.
  */
 
 import { NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api/policy";
-import { isDbConfigured, markStaleProposals } from "@/lib/db";
+import { isDbConfigured } from "@/lib/db";
+import { markStaleProposals } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 const ROUTE = "/api/cron/proposals/mark-stale";
 
 export async function POST(request: Request): Promise<NextResponse> {
-  // Admin/operational auth only: no user-session fallback. Missing, malformed,
-  // or stale credentials fail closed via the policy tier.
   const header = request.headers.get("authorization") ?? "";
   const presented = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   const auth = authorizeRequest("internal_worker", {
@@ -42,9 +38,6 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   try {
     const nowSeconds = Math.floor(Date.now() / 1000);
-    // Idempotent sweep: repeated or duplicate invocations only touch rows
-    // still in a non-terminal queued/in-review state, so already-stale
-    // proposals are not re-processed.
     const count = await markStaleProposals(nowSeconds);
 
     return NextResponse.json(
@@ -56,13 +49,10 @@ export async function POST(request: Request): Promise<NextResponse> {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
-    // Dependency failure (DB down, transaction aborted) is reported as a 500
-    // without leaking credentials or row details. Soroban state remains
-    // authoritative; this sweep only marks deadline-expired proposals.
-    console.error("[cron/proposals/mark-stale] Error:", err instanceof Error ? err.message : "Unknown error");
+    console.error("[cron/proposals/mark-stale] Error:", err);
     return NextResponse.json(
-      { error: { message: "Internal error" } },
-      { status: 500, headers: { "Cache-Control": "no-store" } },
+      { error: { message: err instanceof Error ? err.message : "Internal error" } },
+      { status: 500 },
     );
   }
 }

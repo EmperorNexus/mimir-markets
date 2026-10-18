@@ -1,17 +1,16 @@
-/**
- * Access tiers for API routes (#11).
+/*
+ * Access tiers for API routes (11).
  *
  * Five kinds of caller reach these routes and they need different things checked.
- * Before this, each route decided for itself — which is how one of them ends up
+ * Before this, each route decided for itself — which is how one of them ends
  * reading a secret from the wrong header, or forgetting a rate limit, and nobody
  * notices because there is no single place to look.
  *
  *   public_read        anyone, including an OG scraper with no session
  *   authenticated_user a wallet acting for itself
  *   registered_agent   an agent acting under a signed, replay-protected envelope
- *   api_key_agent     an agent presenting a bearer API key
  *   internal_worker    a cron or worker holding the shared secret
- *   admin_operator      an operator presenting the admin secret, distinct from user sessions
+ *   admin_operator     an operator presenting the admin secret, never a user session
  *
  * The rules that make this worth having:
  *
@@ -25,8 +24,10 @@
  *    it is free to avoid.
  *  - **A missing configured secret refuses everything.** An unset CRON_SECRET must
  *    not mean "no auth required" — that turns a deploy mistake into an open
- *    endpoint. The same applies to ADMIN_SECRET: admin auth is not a user session
- *    and must not fall back to one.
+ *    endpoint.
+ *  - **Admin auth is not a user session.** An admin tier requires the admin
+ *    secret and refuses any request that arrives with a wallet session credential.
+ *    Separating the two means a stolen user session cannot act as an operator.
  */
 
 import { apiError, type ApiErrorCode, type ApiErrorResult } from "./errors";
@@ -54,7 +55,7 @@ export interface TierPolicy {
   requiresSignature: boolean;
   /** The shared worker secret must match. */
   requiresWorkerSecret: boolean;
-  /** The admin secret must match. Distinct from the worker secret. */
+  /** The admin secret must match. */
   requiresAdminSecret: boolean;
   /** Requires browser-origin validation for mutating requests (CSRF protection). */
   requiresOriginValidation: boolean;
@@ -92,7 +93,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     limitDimensions: ["agent", "route"],
   },
   /**
-   * A registered agent presenting an API key instead of signing every envelope.
+   * A a registered agent presenting an API key instead of signing every envelope.
    *
    * No wallet and no per-request signature: the key is the credential, and what the
    * key can *spend* is bounded separately by the owner-signed spend permission. A
@@ -122,16 +123,16 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     limitDimensions: ["route"],
   },
   /**
-   * An operator tool caller presenting the admin secret.
+   * An operator acting on operational state (review queues, pause controls).
    *
-   * Admin authentication is deliberately not a user session and not the worker
-   * secret: an admin operator is not a wallet acting for itself, and a cron job
-   * is not an operator. Mixing them means a compromised worker credential
-   * could drive operational actions, or a logged-in user could reach them.
+   * This is deliberately not `uthenticated_user`. Admin authority is a
+   * server-side secret (`ADMIN_SECRET`), not a wallet session. A compromised
+   * user session must not be able to claim, approve, cancel or pause anything,
+   * and an admin secret must not grant a user's funded actions.
    *
-   * Bucketed by IP and route: the admin secret is shared, so there is no stable
-   * per-operator identity to bucket by, and an exhausted operator should not be
-   * able to look up the secret by brute forcing.
+   * The admin secret is a separate variable from `CRON_SECRET` so that a
+   * creature that can run scheduled sweeps is not automatically able to approve
+   * markets, and vice versa. Both fail closed when unset.
    */
   admin_operator: {
     tier: "admin_operator",
@@ -140,7 +141,9 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWorkerSecret: false,
     requiresAdminSecret: true,
     requiresOriginValidation: false,
-    limitDimensions: ["ip", "route"],
+    // Route only: operators are few and trusted; bucketing by IP would let one
+    // operator behind a shared VPN exhaust another's budget.
+    limitDimensions: ["route"],
   },
 };
 
@@ -155,7 +158,7 @@ export interface RequestContext {
   presentedSecret?: string;
   /** Secret the server expects for the worker tier. Undefined means none is configured. */
   expectedSecret?: string;
-  /** Admin secret presented by the caller. Distinct from the worker secret. */
+  /** Admin secret presented by the caller. */
   presentedAdminSecret?: string;
   /** Admin secret the server expects. Undefined means none is configured. */
   expectedAdminSecret?: string;
@@ -202,6 +205,21 @@ export function authorizeRequest(
     tier,
   });
 
+  // Admin authority comes from the admin secret alone. A wallet session on an
+  // admin route is a confused-deputy signal, not a weaker credential.
+  if (policy.requiresAdminSecret) {
+    if (ctx.wallet) {
+      return refuse("forbidden", "admin routes do not accept user sessions");
+    }
+    const expected = ctx.expectedAdminSecret?.trim();
+    // An unset admin secret refuses rather than waving everyone through.
+    if (!expected) return refuse("forbidden", "admin secret is not configured");
+    const presented = ctx.presentedAdminSecret?.trim() ?? "";
+    if (!presented || !secretsMatch(presented, expected)) {
+      return refuse("unauthenticated", "invalid admin credentials");
+    }
+  }
+
   if (policy.requiresWorkerSecret) {
     const expected = ctx.expectedSecret?.trim();
     // An unset secret refuses rather than waves everyone through: a deploy that
@@ -210,17 +228,6 @@ export function authorizeRequest(
     const presented = ctx.presentedSecret?.trim() ?? "";
     if (!presented || !secretsMatch(presented, expected)) {
       return refuse("unauthenticated", "invalid worker credentials");
-    }
-  }
-
-  if (policy.requiresAdminSecret) {
-    const expected = ctx.expectedAdminSecret?.trim();
-    // Admin auth fails closed too. An unset ADMIN_SECRET must not fall back to
-    // a user session or the worker secret — those are different trust boundaries.
-    if (!expected) return refuse("forbidden", "admin secret is not configured");
-    const presented = ctx.presentedAdminSecret?.trim() ?? "";
-    if (!presented || !secretsMatch(presented, expected)) {
-      return refuse("unauthenticated", "invalid admin credentials");
     }
   }
 

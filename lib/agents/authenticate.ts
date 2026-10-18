@@ -11,13 +11,6 @@
  *                authority itself (register, revoke), because those must not be
  *                reachable by a credential the owner cannot see being used.
  *
- * Admin authentication is deliberately NOT handled here. Admin routes use a
- * separate admin session policy (see lib/admin/session.ts) so that a user
- * session can never be replayed against operational/admin actions, and an
- * admin credential can never be used to act as a user or agent. Keeping the
- * two credential spaces disjoint is what preserves funded-state safety and
- * clear operational boundaries.
- *
  * Rate limiting happens here too, so no route can forget it.
  */
 
@@ -51,15 +44,6 @@ export type AgentAuth =
   | { kind: "api_key"; agentId: string; keyId: string; scopes?: readonly string[] }
   | { kind: "signature" };
 
-/**
- * Admin actions are never satisfiable by an agent credential. This guard exists
- * so a route that accidentally routes an admin action through the agent
- * authenticator fails closed instead of silently accepting a user/agent key.
- */
-export function isAdminAction(action: string): boolean {
-  return action.startsWith("admin.") || action.startsWith("admin:");
-}
-
 export interface AuthenticateResult {
   auth?: AgentAuth;
   error?: ApiErrorResult;
@@ -79,17 +63,6 @@ export async function authenticateAgentRequest(args: {
   /** Agent id claimed by the request body, checked against the key's own agent. */
   claimedAgentId?: string;
 }): Promise<AuthenticateResult> {
-  if (isAdminAction(args.action)) {
-    // Admin authentication is a separate policy; refuse rather than fall through
-    // to signature or key handling, which would blur the operational boundary.
-    return {
-      error: apiError(
-        "forbidden",
-        "admin actions require admin authentication, not agent credentials",
-      ),
-    };
-  }
-
   const presented = parseApiKeyHeader(args.authorization);
   const route = `/api/agents/v1/${args.action}`;
 
@@ -143,5 +116,5 @@ export async function authenticateAgentRequest(args: {
   // request that was otherwise authorised.
   void touchAgentApiKey(checked.record.keyId, Date.now()).catch(() => undefined);
 
-  return { auth: { kind: "api_key", agentId: checked.record.agentId, keyId: checked.record.keyId, scopes: checked.record.scopes } };
+  return { auth: {kind: "api_key", agentId: checked.record.agentId, keyId: checked.record.keyId, scopes: checked.record.scopes } };
 }

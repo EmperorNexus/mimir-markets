@@ -1,15 +1,18 @@
-/**
+/*
  * The proposal review queue.
  *
  * Reads the pending market-creator proposals and moves them through the
  * queued -> in_review -> approved/rejected state machine. It is an operator tool,
- * not a user-facing API, so every handler is gated on the `admin_operator` tier
- * and the dedicated `ADMIN_SECRET`. Admin auth is not a user session and not
- * the cron worker secret: an unset or misconfigured admin secret refuses.
+ * not a user-facing API, so every handler is gated on the `admin_operator`
+ * tier and the `ADMIN_SECRET`. The admin secret is deliberately separate
+ * from `CRON_SECRET` and from user sessions: a cron that can run scheduled
+ * sweeps is not automatically able to approve markets, and a wallet
+ * session is never accepted as an operator credential. An unset
+ * `ADMIN_SECRET` refuses rather than waving callers through.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { authorizeAdminRequest } from "@/lib/api/admin-auth";
+import { adminDenieResponse, authorizeAdminRequest } from "@/lib/api/admin-auth";
 import { getDb, isDbConfigured } from "@/lib/db";
 import {
   claimProposalForReview,
@@ -25,14 +28,15 @@ export const runtime = "nodejs";
 const ROUTE = "/api/proposals/review";
 
 function json(data: unknown, status = 200): NextResponse {
-  return NextResponse.json(data, { status });
+  return NextResponse.json(data, { status, headers: { "cache-control": "no-store" } });
 }
 
 function errorResponse(message: string, status = 400): NextResponse {
   return json({ error: { message } }, status);
 }
 
-function requireAuth(request: NextRequest, mutatesValue: boolean, idempotencyKey?: string): NextResponse | null {
+function requireAdmin(request: NextRequest, mutatesValue: boolean): NextResponse | null {
+  const idempotencyKey = request.headers.get("idempotency-key") ?? undefined;
   const auth = authorizeAdminRequest({
     route: ROUTE,
     headers: request.headers,
@@ -40,13 +44,11 @@ function requireAuth(request: NextRequest, mutatesValue: boolean, idempotencyKey
     idempotencyKey,
   });
   if (auth.allowed) return null;
-  const error = auth.error;
-  if (!error) return errorResponse("Unauthorized", 401);
-  return NextResponse.json(error.body, { status: error.status, headers: error.headers });
+  return adminDenieResponse(auth);
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const denied = requireAuth(request, false);
+  const denied = requireAdmin(request, false);
   if (denied) return denied;
 
   if (!isDbConfigured()) {
@@ -79,7 +81,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
      FROM market_proposals
      ${whereClause}
      ORDER BY queued_at DESC NULLS LAST, created_at DESC
-     LIMIT ? OFFSET ?`,
+     LIMIT ? OFFSET ${offset < 0 ? 0 : offset}`,
     args,
   );
 
@@ -91,6 +93,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  const denied = requireAdmin(request, true);
+  if (denied) return denied;
+
   if (!isDbConfigured()) {
     return errorResponse("Database not configured", 503);
   }
@@ -102,24 +107,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return errorResponse("Invalid JSON body", 400);
   }
 
-  const { action, proposalId, reviewer, approve, reason, idempotencyKey } = body as {
+  if (!body || typeof body !== "object") {
+    return errorResponse("Invalid JSON body", 400);
+  }
+
+  const { action, proposalId, reviewer, approve, reason } = body as {
     action: "claim" | "complete" | "cancel" | "mark_stale" | "mark_dependency_failed";
     proposalId?: string;
     reviewer?: string;
     approve?: boolean;
     reason?: string;
-    idempotencyKey?: string;
   };
-
-  // Operational actions change state, so they demand an idempotency key and admin
-  // auth. The key can come from the body or the `Idempotency-Key` header.
-  const effectiveKey =
-    typeof idempotencyKey === "string" && idempotencyKey.trim()
-      ? idempotencyKey.trim()
-      : request.headers.get("idempotency-key") ?? "";
-
-  const denied = requireAuth(request, true, effectiveKey);
-  if (denied) return denied;
 
   if (!action) {
     return errorResponse("Missing action", 400);
@@ -178,7 +176,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }
 
       default:
-        return errorResponse(`Unknown action: ${action}`, 400);
+        return errorResponse(`Unknown action: ${String(action)}`, 400);
     }
   } catch (err) {
     console.error("[proposals/review] Error:", err);
@@ -187,6 +185,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 }
 
 export async function PATCH(request: NextRequest): Promise<NextResponse> {
+  const denied = requireAdmin(request, true);
+  if (denied) return denied;
+
   if (!isDbConfigured()) {
     return errorResponse("Database not configured", 503);
   }
@@ -198,27 +199,22 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
     return errorResponse("Invalid JSON body", 400);
   }
 
-  const { proposalId, status, reviewer, failureReason, idempotencyKey } = body as {
-    proposalId: string;
-    status: "queued" | "in_review" | "approved" | "rejected" | "cancelled" | "stale" | "dependency_failed";
+  if (!body || typeof body !== "object") {
+    return errorResponse("Invalid JSON body", 400);
+  }
+
+  const { proposalId, status, reviewer, failureReason } = body as {
+    proposalId?: string;
+    status?: "queued" | "in_review" | "approved" | "rejected" | "cancelled" | "stale" | "dependency_failed";
     reviewer?: string;
     failureReason?: string;
-    idempotencyKey?: string;
   };
-
-  const effectiveKey =
-    typeof idempotencyKey === "string" && idempotencyKey.trim()
-      ? idempotencyKey.trim()
-      : request.headers.get("idempotency-key") ?? "";
-
-  const denied = requireAuth(request, true, effectiveKey);
-  if (denied) return denied;
 
   if (!proposalId || !status) {
     return errorResponse("Missing proposalId or status", 400);
   }
 
-  const validStatuses = ["queued", "in_review", "approved", "rejected", "cancelled", "stale", "dependency_failed"];
+  const validStatuses = ["queued", "in_review", "approved", "rejected", "cancelled", "stale", "dependency_failed"] as const;
   if (!validStatuses.includes(status)) {
     return errorResponse(`Invalid status: ${status}`, 400);
   }
