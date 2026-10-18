@@ -6,7 +6,7 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String};
 use crate::escrow;
 use crate::pool;
 use crate::storage;
-use crate::types::{ClaimResult, Error, Market};
+use crate::types::{ClaimResult, Error, Market, PendingOracle};
 
 #[contract]
 pub struct MimirSquad;
@@ -53,8 +53,20 @@ impl MimirSquad {
         pool::withdraw_before_deadline(&env, participant, market_id, side, amount)
     }
 
+    
+    pub fn transition_deadline(env: Env, market_id: u64) -> Result<(), Error> {
+        pool::transition_deadline(&env, market_id)
+    }
+
     pub fn resolve(env: Env, market_id: u64, result: u32) -> Result<(), Error> {
         pool::resolve(&env, market_id, result)
+    }
+
+    /// Captain-initiated market cancellation, only before the deadline. Sets the
+    /// market as resolved with result=RESULT_CANCELLED, allowing all depositors
+    /// to claim full refunds via claim(). No fees are charged on cancellation.
+    pub fn cancel_market(env: Env, market_id: u64) -> Result<(), Error> {
+        pool::cancel_market(&env, market_id)
     }
 
     /// Pull-based payout. Solidity used `msg.sender`; Soroban has no equivalent
@@ -66,6 +78,18 @@ impl MimirSquad {
 
     pub fn claim_fees(env: Env) -> Result<i128, Error> {
         pool::claim_fees(&env)
+    }
+
+    /// Retry a payout that [`Self::claim`] parked because the transfer trapped
+    /// (frozen or deauthorized trustline). Returns the amount moved, or `0`
+    /// when nothing is parked.
+    pub fn claim_parked_payout(
+        env: Env,
+        participant: Address,
+        market_id: u64,
+        side: u32,
+    ) -> Result<i128, Error> {
+        pool::claim_parked_payout(&env, participant, market_id, side)
     }
 
     // ── Views ────────────────────────────────────────────────────────────────
@@ -99,12 +123,37 @@ impl MimirSquad {
         storage::accrued_fees(&env)
     }
 
+    /// Payout settled in the ledger but not delivered to one winner, because
+    /// the token transfer trapped. `claim_parked_payout` moves it.
+    pub fn parked_payout(env: Env, market_id: u64, side: u32, who: Address) -> i128 {
+        storage::payout_of(&env, market_id, side, &who)
+    }
+
     pub fn get_usdc(env: Env) -> Result<Address, Error> {
         storage::usdc(&env)
     }
 
     pub fn get_oracle(env: Env) -> Result<Address, Error> {
         storage::oracle(&env)
+    }
+
+    /// Queue an oracle rotation; the current oracle must authorize.
+    pub fn queue_oracle(env: Env, new_oracle: Address) -> Result<(), Error> {
+        pool::queue_oracle(&env, new_oracle)
+    }
+
+    /// Drop a queued oracle rotation; the current oracle must authorize.
+    pub fn cancel_oracle(env: Env) -> Result<(), Error> {
+        pool::cancel_oracle(&env)
+    }
+
+    /// Apply a queued oracle rotation once its timelock has elapsed.
+    pub fn execute_oracle(env: Env) -> Result<(), Error> {
+        pool::execute_oracle(&env)
+    }
+
+    pub fn get_pending_oracle(env: Env) -> Option<PendingOracle> {
+        storage::pending_oracle(&env)
     }
 
     pub fn get_fee_recipient(env: Env) -> Result<Address, Error> {

@@ -49,7 +49,6 @@ Captures the current deployment configuration into a `DeploymentSnapshot`:
 - Feature flag state (`MIMIR_FEATURE_*`)
 - Admin auth state (`MIMIR_ADMIN_AUTH_*`: separate session cookie name, signing secret presence, TTL, and whether admin sessions are isolated from user sessions)
 - Pause state (`MIMIR_PAUSE_*`)
-- Pause state (`MIMIR_PAUSE_*`)
 - Fee policy (`STELLAR_PLATFORM_FEE_BPS`, `STELLAR_AGENT_OWNER_FEE_BPS`)
 - Contract ids (`NEXT_PUBLIC_STELLAR_MARKET_CONTRACT_ID`, etc.)
 

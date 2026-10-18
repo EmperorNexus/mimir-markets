@@ -25,6 +25,18 @@ mod test_common;
 #[cfg(test)]
 mod test_decimals;
 #[cfg(test)]
+mod test_dust_isolation;
+#[cfg(test)]
+mod test_fee_rounding;
+#[cfg(test)]
+mod test_frozen_payouts;
+#[cfg(test)]
 mod test_lifecycle;
 #[cfg(test)]
+mod test_membership_cap;
+#[cfg(test)]
 mod test_payouts;
+#[cfg(test)]
+mod test_cancellation;
+#[cfg(test)]
+mod test_oracle;

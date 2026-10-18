@@ -19,10 +19,56 @@ import type { EvidenceCacheEntry } from "./types";
 
 const MAX_CONTENT_CHARS = 8_000;
 
+/** The fetch used on a cache miss; injectable so tests need no network. */
+export type EvidenceFetcher = typeof fetchEvidenceShared;
+
+/** Result of an integrity check on a cache entry. */
+export interface EvidenceIntegrityResult {
+  /** True if the entry passed all integrity checks. */
+  success: boolean;
+  /** Reason for failure, or empty string on success. */
+  reason: string;
+}
+
+/**
+ * Validate that a cached evidence entry is consistent with its hash and text.
+ *
+ * This check ensures that:
+ * - The hash is a valid SHA-256 hex string (64 hex characters).
+ * - The hash matches the actual SHA-256 of the text content.
+ * - The text is neither empty nor longer than the fetch cap.
+ * - The entry names the fetcher that produced it.
+ */
+export function validateEvidenceIntegrity(entry: EvidenceCacheEntry): EvidenceIntegrityResult {
+  if (!entry.hash || typeof entry.hash !== "string") {
+    return { success: false, reason: "missing or invalid hash field" };
+  }
+  if (!/^[0-9a-fA-F]{64}$/.test(entry.hash)) {
+    return { success: false, reason: "invalid hash format - expected 32-byte hex" };
+  }
+  if (typeof entry.text !== "string") {
+    return { success: false, reason: "missing or invalid text field" };
+  }
+  if (entry.text.length === 0) {
+    return { success: false, reason: "evidence text is empty" };
+  }
+  if (entry.text.length > MAX_CONTENT_CHARS) {
+    return { success: false, reason: "evidence text exceeds maximum length" };
+  }
+  if (sha256Hex(entry.text) !== entry.hash) {
+    return { success: false, reason: "hash mismatch - data may be tampered or stale" };
+  }
+  if (!entry.fetcher || typeof entry.fetcher !== "string") {
+    return { success: false, reason: "missing or invalid fetcher field" };
+  }
+  return { success: true, reason: "" };
+}
+
 export async function getOrFetchEvidence(
   claimId: number,
   resolutionUrl: string,
   cache: Map<number, EvidenceCacheEntry>,
+  fetcher: EvidenceFetcher = fetchEvidenceShared,
 ): Promise<EvidenceCacheEntry> {
   const hit = cache.get(claimId);
   if (hit) return hit;
@@ -38,14 +84,16 @@ export async function getOrFetchEvidence(
   }
 
   try {
-    const snap = await fetchEvidenceShared(resolutionUrl, {
+    const snap = await fetcher(resolutionUrl, {
       maxChars:  MAX_CONTENT_CHARS,
       userAgent: "Mimir-Council/1.0",
     });
     const entry: EvidenceCacheEntry = {
-      text:    snap.text,
-      fetcher: snap.fetcher,
-      hash:    sha256Hex(snap.text),
+      text:      snap.text,
+      fetcher:   snap.fetcher,
+      hash:      sha256Hex(snap.text),
+      fetchedAt: snap.fetchedAt,
+      sourceUrl: snap.sourceUrl,
     };
     cache.set(claimId, entry);
     return entry;

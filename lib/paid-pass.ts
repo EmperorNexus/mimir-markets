@@ -7,7 +7,9 @@
  * expiry); bind to caller identity + a nonce store if abuse becomes a concern.
  */
 
-import "server-only";
+// Pure pass logic, importable by tests. Routes import `@/lib/server/paid-pass`,
+// which carries the `server-only` marker so the signing secret never reaches a
+// client bundle.
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 function secret(): string {
