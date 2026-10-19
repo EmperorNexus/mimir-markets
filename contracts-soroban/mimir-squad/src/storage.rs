@@ -2,7 +2,7 @@
 
 use soroban_sdk::{contracttype, Address, Env};
 
-use crate::types::{Error, Market, PendingOracle};
+use crate::types::{Error, Market, PendingFeeRecipient, PendingOracle};
 
 #[contracttype]
 #[derive(Clone)]
@@ -12,6 +12,7 @@ pub enum DataKey {
     Oracle,
     FeeRecipient,
     PendingOracle,
+    PendingFeeRecipient,
     MarketCount,
     AccruedFees,
     Market(u64),
@@ -81,6 +82,26 @@ pub fn clear_pending_oracle(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingOracle);
 }
 
+pub fn set_fee_recipient(env: &Env, recipient: &Address) {
+    env.storage()
+        .instance()
+        .set(&DataKey::FeeRecipient, recipient);
+}
+
+pub fn pending_fee_recipient(env: &Env) -> Option<PendingFeeRecipient> {
+    env.storage().instance().get(&DataKey::PendingFeeRecipient)
+}
+
+pub fn set_pending_fee_recipient(env: &Env, pending: &PendingFeeRecipient) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingFeeRecipient, pending);
+}
+
+pub fn clear_pending_fee_recipient(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingFeeRecipient);
+}
+
 // ── Counters ─────────────────────────────────────────────────────────────────
 
 pub fn market_count(env: &Env) -> u64 {
@@ -118,6 +139,19 @@ pub fn get_market(env: &Env, id: u64) -> Result<Market, Error> {
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
     Ok(market)
+}
+
+pub fn get_market_opt(env: &Env, id: u64) -> Option<Market> {
+    let key = DataKey::Market(id);
+    match env.storage().persistent().get::<_, Market>(&key) {
+        Some(market) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
+            Some(market)
+        }
+        None => None,
+    }
 }
 
 pub fn set_market(env: &Env, id: u64, market: &Market) {

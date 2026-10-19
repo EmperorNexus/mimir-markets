@@ -1,5 +1,4 @@
-import { NextResponse } from "next/server";
-
+import { authorizeRequest } from "@/lib/api/rate-limit";
 import {
   moderateClaim,
   type ClaimModerationInput,
@@ -68,4 +67,3 @@ export async function POST(request: Request) {
 
   return handleClaimModerationPost({ request, moderateClaim });
 }
-
