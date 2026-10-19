@@ -300,10 +300,10 @@ export default function Header() {
                   type="button"
                   onClick={connect}
                   disabled={isConnecting}
-                  aria-label={isConnecting ? "Connecting to wallet" : "Connect wallet"}
+                  aria-busy={isConnecting}
                   className="btn-compact-primary px-4 py-1.5 text-[13px] focus-ring"
                 >
-                  {isConnecting ? "..." : tc("connect")}
+                  {isConnecting ? tc("loading") : tc("connect")}
                 </button>
               )}
             </div>
@@ -326,10 +326,10 @@ export default function Header() {
                   type="button"
                   onClick={connect}
                   disabled={isConnecting}
-                  aria-label={isConnecting ? "Connecting to wallet" : "Connect wallet"}
+                  aria-busy={isConnecting}
                   className="btn-compact-primary px-3 py-1.5 text-[12px]"
                 >
-                  {isConnecting ? "..." : tc("connect")}
+                  {isConnecting ? tc("loading") : tc("connect")}
                 </button>
               )}
               <button
