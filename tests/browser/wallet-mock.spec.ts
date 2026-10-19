@@ -51,11 +51,9 @@ test.describe("wallet-gated money paths", () => {
     trackPageErrors(page, errors);
 
     await page.goto("/en/explorer", { waitUntil: "domcontentloaded" });
-    // The header button shows "Connect" and is labelled "Connect wallet" for
-    // screen readers; only the viewport's visible variant is in the a11y tree.
     await page
       .getByRole("banner")
-      .getByRole("button", { name: "Connect wallet", exact: true })
+      .getByRole("button", { name: "Connect", exact: true })
       .click();
 
     const dialog = page.getByRole("dialog", { name: "Connect wallet" });

@@ -22,6 +22,9 @@ pub const MAX_SQUAD_MEMBERS: u32 = 400;
 pub const MIN_DURATION: u64 = 600; // 10 minutes
 pub const MAX_DURATION: u64 = 31_536_000; // 365 days
 
+/// Maximum number of market ids accepted by `get_markets_batch` in a single call.
+pub const MAX_BATCH_SIZE: u32 = 50;
+
 /// Upper bound on the byte length of a market question.
 ///
 /// The question is free text supplied by the captain and carried on the
@@ -41,12 +44,23 @@ pub const USDC_DECIMALS: u32 = 7;
 /// A queued oracle rotation cannot take effect before this much time passes.
 pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 
+/// A queued fee-recipient rotation cannot take effect before this much time passes.
+pub const FEE_RECIPIENT_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
+
 // ── Storage shapes ───────────────────────────────────────────────────────────
 
 /// A queued oracle rotation, executable once `executable_at` has passed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingOracle {
+    pub next: Address,
+    pub executable_at: u64,
+}
+
+/// A queued fee-recipient rotation, executable once `executable_at` has passed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingFeeRecipient {
     pub next: Address,
     pub executable_at: u64,
 }
@@ -128,4 +142,9 @@ pub enum Error {
     NothingQueued = 31,
     /// `execute_oracle` was called before the rotation's timelock elapsed.
     Timelocked = 32,
+    /// `get_markets_batch` was called with more than `MAX_BATCH_SIZE` ids. Refused before reading storage.
+    BatchTooLarge = 33,
+    /// `cancel_fee_recipient` / `execute_fee_recipient` found no queued
+    /// fee-recipient rotation.
+    NoFeeRecipientQueued = 34,
 }
