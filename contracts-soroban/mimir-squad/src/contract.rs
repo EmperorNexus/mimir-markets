@@ -1,12 +1,12 @@
 //! Public contract surface. Bodies live in `pool`; this file is the single
 //! `#[contractimpl]` block plus the read-only views.
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 use crate::escrow;
 use crate::pool;
 use crate::storage;
-use crate::types::{ClaimResult, Error, Market, PendingOracle};
+use crate::types::{ClaimResult, Error, Market, PendingOracle, MAX_BATCH_SIZE};
 
 #[contract]
 pub struct MimirSquad;
@@ -98,6 +98,24 @@ impl MimirSquad {
         storage::get_market(&env, market_id)
     }
 
+    pub fn get_markets_batch(
+        env: Env,
+        ids: Vec<u64>,
+    ) -> Result<Vec<Option<Market>>, Error> {
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+
+        let mut results: Vec<Option<Market>> = Vec::new(&env);
+        for id in ids.iter() {
+            results.push_back(storage::get_market_opt(&env, id));
+        }
+        Ok(results)
+    }
+
     pub fn get_deposit(env: Env, market_id: u64, side: u32, who: Address) -> i128 {
         storage::deposit_of(&env, market_id, side, &who)
     }
@@ -156,8 +174,27 @@ impl MimirSquad {
         storage::pending_oracle(&env)
     }
 
+    /// Queue a fee recipient rotation; the current fee recipient must authorize.
+    pub fn queue_fee_recipient(env: Env, new_recipient: Address) -> Result<(), Error> {
+        pool::queue_fee_recipient(&env, new_recipient)
+    }
+
+    /// Drop a queued fee recipient rotation; the current fee recipient must authorize.
+    pub fn cancel_fee_recipient(env: Env) -> Result<(), Error> {
+        pool::cancel_fee_recipient(&env)
+    }
+
+    /// Apply a queued fee recipient rotation once its timelock has elapsed.
+    pub fn execute_fee_recipient(env: Env) -> Result<(), Error> {
+        pool::execute_fee_recipient(&env)
+    }
+
     pub fn get_fee_recipient(env: Env) -> Result<Address, Error> {
         storage::fee_recipient(&env)
+    }
+
+    pub fn get_pending_fee_recipient(env: Env) -> Option<Address> {
+        storage::pending_fee_recipient(&env)
     }
 
     pub fn get_escrow_balance(env: Env) -> Result<i128, Error> {

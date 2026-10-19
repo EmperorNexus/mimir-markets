@@ -39,6 +39,23 @@ for (const [route, heading] of PUBLIC_PAGES) {
     // Signature heading (may be client-rendered; Playwright polls for it).
     await expect(page.getByRole("heading", { name: heading }).first()).toBeVisible();
 
+    if (route !== "/en/") {
+      const connectButton = page
+        .getByRole("banner")
+        .getByRole("button", { name: "Connect", exact: true });
+      await expect(connectButton).toBeVisible();
+      await expect(connectButton).toHaveAccessibleName("Connect");
+    }
+
+    // Specific page title assertions
+    if (route === "/en/council") {
+      await expect(page).toHaveTitle("Council");
+    } else if (route === "/en/stats") {
+      await expect(page).toHaveTitle("Stats");
+    } else if (route === "/en/agents") {
+      await expect(page).toHaveTitle("Agents");
+    }
+
     // The page is real content, not a blank shell.
     const bodyLength = await page.evaluate(() => document.body.innerText.length);
     expect(bodyLength).toBeGreaterThan(200);
